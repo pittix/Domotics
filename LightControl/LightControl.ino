@@ -1,40 +1,65 @@
+/**
+ * Script for general arduinos. It has light control feature (which turns on and off lights if there's movement in a room) and register the room temperature.
+ * In this way the main controller can know the exact temperature and what to do (e.g. turn on or off the heat/cooling)
+ * The sketch exploit the sleeping to reduce its power consumption (though it can be powered by the power grid)
+ */
+// PIN
 #define LDR A0 //light sesor
 #define PIR 0 //movement ir sensor
 #define RELAY 1
- #define LM35 A2 //temp sensor
-//Transmission
-#define SPEED 2000 //bps
-#define TX_PIN 1
-#define RX_PIN A1
-#define PTT_PIN 2         //dr3100 
-#define PTT_INVERTED true //parameters
+#define LM35 A2 //temp sensor
+
+//pin relay
+#define relay 0 
+#define FORCE_MANUAL 1
+#define TEMPERATURE 2
+
+//Transmission spec
+#define ARD_ID 0x50
 //Message parameters
-#define TO_ME 0b00000001
-#define ID 0b00000010
-#define RASP_HEADER 0b00000100
-#define OK_ANSWER 0b10101010
-#define COMMAND_BIT  0b11000000
-#define OUT_COMMAND  0b00101010 //isOut ask
-#define IS_OUT 0b01000000
-#define GET_TEMP 0b10000000
+#define IN_HOME   0b10000000
+#define STATUS    0b01100000
+#define AUTO_OFF  0b00100000
+#define HEAT_COOL 0b01000000
+#define TEMP_MASK 0b00001111
+#define ZERO_TEMP 150
+
 #define CONV_TEMP 0.48828125 //LM35 converting from Analog input to celsius degrees
 #define SET_TEMP 0b01000000 
 #define GET_IS_OUT 0b11000000
 
-#include <RH_ASK.h>
-#include <math.h>
-RH_ASK trasm(SPEED,RX_PIN,TX_PIN,PTT_PIN,PTT_INVERTED);
-bool isOut=false;
-uint8_t buflen = 3;
+#include <Wire.h> //transmission library
+#include <math.h> //needed for (int) = round(float/decimal var);
+#include <EEPROM.h> // store values into memory. I need 4 bytes, ATMega328p has 1024 bytes
+#include <avr/sleep.h> // power save mode
+#include <avr/wdt.h> // watchdog
+
+#define WAIT 7 //cycles of 8 seconds
+
+//EEPROM addresses
+#define ADDR_ID 1
+#define ADDR_TEMP   2 // address where temperature is set
+#define ADDR_STATUS 3 // address where the status is set (manual mode and cooling or heating is on)
+
+bool isOut;
+uint8_t status;
+uint8_t histTemp[5];
+bool forceManual=false;
+const long InternalReferenceVoltage = 1062; // power voltage. Needed for temperature 
+
 void setup() {
-  
+  analogReference (INTERNAL);//Internal AREF
+  Wire.begin(ARD_ID); // the arduino is a slave. 
+  TWAR = (ARD_ID << 1) | 1;  // enable broadcasts to be received
+  Wire.onReceive(receiveData);
+  Wire.onRequest(sendData);
   pinMode(PIR,INPUT);
   pinMode (RELAY,OUTPUT);
-  if(trasm.init()) { error(); }
-  initData();
+//  pinMode(reset,OUTPUT); // if needed to do an update via I2C
+//  
 }
-
 void loop() {
+  
    int light = analogRead(LDR);
    if(!isOut){
       if(digitalRead(PIR)==HIGH){
@@ -50,91 +75,52 @@ void loop() {
    else {
      digitalWrite(RELAY,LOW);
    }
-   
-   if(trasm.available()){
-      getMsg();
-   }
+
 
 }
-void initData(){
-    uint8_t msg[]={RASP_HEADER,GET_IS_OUT};
-    uint8_t *buf;
-    bool recieved=false;
-    while(!recieved){
-      trasm.setModeTx();
-      trasm.send(msg,2);
-      trasm.waitPacketSent();
-      trasm.setModeRx();
-      delay(100);
-      if(trasm.recv(buf,&buflen)){
-         if((buf[1] & TO_ME)==TO_ME){
-            if((buf[1] & ID)==ID){
-              if((buf[2] & IS_OUT)==IS_OUT){
-                isOut=true;
-              }
-              else {
-                isOut=false;
-                 
-              }
-            }
-         }       
-        }
-    }   
+
+void receiveData(int numB){
+  byte data = Wire.read(); // 1 byte data (0,0,0,0,0, in home/out[1], status[2])
+  uint8_t temperature = data & TEMP_MASK; // extract temperature
+  status = data & !TEMP_MASK; //the other 4 bits are for the status
+   
 }
-   void getMsg(){
-  uint8_t *buf;
-    if(trasm.recv(buf,&buflen)){
-              
-              if((buf[1] & TO_ME)==TO_ME){ //dal raspi
-                  if((buf[1] & ID)==ID){//sono io
-                    switch(buf[2] & COMMAND_BIT ) {
-                      case IS_OUT:{
-                            if((buf[2]&OUT_COMMAND)==OUT_COMMAND){
-                                isOut=true;
-                                sendOK();
-                             }
-                            else
-                                isOut=false;    
-                        }
-                      case GET_TEMP:{
-                              getTemp(); //set only if has the temperature sensor
-                        }
-                      
-                      }
-                  }
-              } 
-    
-    }
-  }
- void getTemp(){
-    float temp=0;
-    float sumTemp=0;
-    for(byte i=0;i<20;i++){
-      temp=(analogRead(LDR)*CONV_TEMP);
-      sumTemp +=temp;
-      delay(50);
-    }
-    temp=sumTemp/20;
-    uint8_t prepTemp = (uint8_t ) round(temp);
-    uint8_t sendTemp= (SET_TEMP | prepTemp);
-    uint8_t msg[]={RASP_HEADER,sendTemp};
-    trasm.setModeTx();
-    trasm.send(msg,2);
-    trasm.waitPacketSent();
-    trasm.setModeRx();  
-  }
-void sendOK(){
-      uint8_t msg[]={RASP_HEADER,OK_ANSWER};
-   trasm.setModeTx();
-    trasm.send(msg,2);
-    trasm.waitPacketSent();
-    trasm.setModeRx(); 
-  }  
-void error(){
-    while(true){
-        pinMode(RELAY,HIGH);
-        delay(500);
-        pinMode(RELAY,LOW);
-        delay(500);
-      }
-  }
+//send data on ESP8266 requests. Stupid version, need optimization
+void sendData(int numB){
+  uint8_t data[6];
+  data[0] = histTemp[0];data[1] = histTemp[1];data[2] = histTemp[2];
+  data[3] = histTemp[3];data[4] = histTemp[4];
+  data[5] = status;
+  Wire.write(data,6);
+}
+
+/* Code courtesy of "Coding Badly" and "Retrolefty" from the Arduino forum
+ * results are Vcc * 10
+ * So for example, 5V would be 50.
+ * - Exploits temp results, saves results into "status" var and in EEPROM
+ */
+void getBandgap () 
+  {
+  // REFS0 : Selects AVcc external reference
+  // MUX3 MUX2 MUX1 : Selects 1.1V (VBG)  
+   ADMUX = bit (REFS0) | bit (MUX3) | bit (MUX2) | bit (MUX1);
+   ADCSRA |= bit( ADSC );  // start conversion
+   while (ADCSRA & bit (ADSC))
+     { }  // wait for conversion to complete
+   uint8_t batt = (((InternalReferenceVoltage * 1024) / ADC) + 5) / 100; // range [0;50] 
+   //encode the value
+   uint8_t codedBatteryStatus;
+   if(batt > 45) { codedBatteryStatus= 0b11; }
+   else if(batt > 33) { codedBatteryStatus= 0b10; }
+   else if(batt > 30) { codedBatteryStatus= 0b1; }
+   else { codedBatteryStatus= 0b0; }
+   //store the battery status
+   uint8_t tmpStatus = EEPROM.read(ADDR_STATUS);
+   if((tmpStatus & 0b11)!= codedBatteryStatus){ //update battery status
+      tmpStatus = tmpStatus & 0b11111100; //reset battery info, keep other info
+      status = tmpStatus | codedBatteryStatus; //update status variable
+      EEPROM.update(ADDR_STATUS,status); // store it on eeprom if changed
+   }
+  } // end of getBandgap
+
+
