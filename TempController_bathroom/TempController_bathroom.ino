@@ -4,170 +4,193 @@
  * @comment This sketch, when ATtiny85 boots ask the RaspberryPi the temperature I set for my house bedroom and 
  * when asked by the RPI turns on or off. periodically it gives to rpi the temperature measured.
  */
+ 
+#include <Wire.h> //transmission library
+#include <math.h> //needed for (int) = round(float/decimal var);
+#include <EEPROM.h> // store values into memory. I need 4 bytes, ATMega328p has 1024 bytes
+#include <avr/sleep.h> // power save mode
+#include <avr/wdt.h> // watchdog
+
+#define WAIT 7 //cycles of 8 seconds
+ 
 //pin relay
 #define relay 0 
+#define FORCE_MANUAL 1
+#define TEMPERATURE 2
+
 //Transmission spec
-#define SPEED 2000 //bps
-#define TX_PIN 1
-#define RX_PIN A1
-#define PTT_PIN 2         //dr3100 
-#define PTT_INVERTED true //parameters
+#define ARD_ID 0x50
 //Message parameters
-#define TO_ME 0b00000001
-#define ID 0b00000010
-#define RASP_HEADER 0b00000100
-#define OK_ANSWER 0b10101010
-#define COMMAND_BIT  0b11000000
-#define GET_TEMP_BIT 0b00111111
-#define ASK_TEMP 0b00000000 //I care about the first 2 bits
-#define SET_TEMP 0b01000000 // i used the ANDs and ORs to choose
-#define ON       0b10000000 //or set the right packet for the message
-#define OFF      0b11000000 //arrived or sent
+#define IN_HOME   0b10000000
+#define STATUS    0b01100000
+#define AUTO_OFF  0b00100000
+#define HEAT_COOL 0b01000000
+#define TEMP_MASK 0b00001111
+#define ZERO_TEMP 150
 
 //Temperature parameters
 #define sensorT A0
 #define CONV_TEMP 0.48828125 //LM35 converting from Analog input to celsius degrees
 
-int chosenTemp;
-float curTemp;
-uint8_t buflen = 3;
+//EEPROM addresses
+#define ADDR_ID 1
+#define ADDR_TEMP   2 // address where temperature is set
+#define ADDR_STATUS 3 // address where the status is set (manual mode and cooling or heating is on)
 
-#include <RH_ASK.h> //transmission library
-#include <math.h> //needed for (int) = round(float/decimal var);
+volatile unsigned long counter = 0; //timer for sleeping
+const long InternalReferenceVoltage = 1062; // power voltage. Needed for temperature 
+uint8_t chosenTemp = 190; // default temperature, in integer, one decimal
+float curTemp;
+
+//store info in only one var [inHome,manualMode,coolOn,heatOn,0,0,battery[2 bit] ] in 0 the one not used
+uint8_t status = 0b10000000; //default: in home and manual mode
+/*battery info are 
+ * 00 for Extremely low (< 3V)
+ * 01 for Low (3V<= batt < 3.3V)
+ * 10 for Normal (3.3V <= batt < 4V)
+ * 11 for High (batt >= 4V)
+ */
+
+bool forceManual=false;
+uint8_t histTemp[5]; //last 5 temperatures, which corresponds to the last 5 minutes approximatly
 //Initializes the ricetransmitter
-RH_ASK trasm(SPEED,RX_PIN,TX_PIN,PTT_PIN,PTT_INVERTED);
 void setup() {
-    
+    analogReference (INTERNAL);//Internal AREF
+    EEPROM.put(ADDR_ID, ARD_ID);
+
+    Wire.begin(ARD_ID); // the arduino is a slave. 
+    TWAR = (ARD_ID << 1) | 1;  // enable broadcasts to be received
+    Wire.onReceive(receiveData);
+    Wire.onRequest(sendData);
     pinMode(relay,OUTPUT);
-  if(!trasm.init()){
-      error();        //activate and deactivate relay to show there's an error
-      }
-  initTemp();
+    pinMode(TEMPERATURE,OUTPUT);
+
+    pinMode(FORCE_MANUAL,INPUT);
+    //re-initialize value if arduino is resetted
+    chosenTemp = EEPROM.read(ADDR_TEMP);
+    status = EEPROM.read(ADDR_STATUS);
 }
 
 void loop() {
+   // sleep for about 56s, then measures the temperature level
+  //sleep doesn't change the pin status (i.e. the relay stays HIGH or LOW while arduino is sleeping)
+  if(++counter >= WAIT){
+    //
+    byte old_ADCSRA = ADCSRA;
+    // disable ADC
+    ADCSRA = 0;  
+    set_sleep_mode(SLEEP_MODE_PWR_DOWN);  
+    sleep_enable();
+    sleep_cpu();
+    sleep_disable();
+    ADCSRA = old_ADCSRA;      
+    counter=0;
+    // release TWI bus / I2C
+    TWCR = bit(TWEN) | bit(TWIE) | bit(TWEA) | bit(TWINT);
+    // turn it back on again
+    Wire.begin(ARD_ID); 
+    TWAR = (ARD_ID << 1) | 1;  // enable broadcasts to be received
+    getBandgap(); //every minute check the battery status
+   }
+  forceManual = (digitalRead(FORCE_MANUAL)==HIGH); //check if I set in failsafe mode
+  //enable temperature sensor (gives current)
+  digitalWrite(TEMPERATURE,HIGH);
   float sumTemp=0;
-  for(byte i=0; i<20;i++){ //The value is more precise
-    curTemp=(analogRead(sensorT)*CONV_TEMP); //need other operation to get the temp value from a value which goes from 0 to 1024
-    sumTemp += curTemp;
-    delay(50);
-    }
-   curTemp=sumTemp/20;
-   if(curTemp<chosenTemp-5)
-      digitalWrite(relay,HIGH);
-   if (curTemp>chosenTemp+5)
-      digitalWrite(relay,LOW);
-      
-  if(trasm.available())
-      getMsg();   //read the message
-}
-void initTemp(){
-  uint8_t msg[]={RASP_HEADER,ASK_TEMP};  
-  trasm.setModeTx();
-  trasm.send(msg,2);
-  trasm.waitPacketSent();
-  trasm.setModeRx();
-  
-  uint8_t buf[3];
-
-  if(trasm.available()) { //wait at max 1 second
-        if(trasm.recv(buf,&buflen)){
-              
-              if((buf[1] & TO_ME)==TO_ME){ //dal raspi
-                  if((buf[1] & ID)==ID){//sono io
-                    switch(buf[2] & COMMAND_BIT ) { //shows only the first 2 bits
-                      case SET_TEMP:{
-                            chosenTemp=(uint8_t)(buf[2] & GET_TEMP_BIT);
-                            break;
-                            }
-                      case ON:{
-                        chosenTemp=(uint8_t)(buf[2] & GET_TEMP_BIT); // Ignores the first 2 command bit and reads the temp
-                        break;
-                        }
-                      case OFF:{
-                        chosenTemp=0; // I could never reach a temperature less than 5 degrees in my house
-                        break;
-                        }                  
-                      }
-                  }
-              }    
-          }
-      
-    } 
- else error();   
- }
-void error(){
-    while(true){
-        pinMode(relay,HIGH);
-        delay(500);
-        pinMode(relay,LOW);
-        delay(500);
-      }
+  uint8_t tmpCurTemp=0;
+  for(byte i=0; i<10;i++){ //The value is more precise
+    tmpCurTemp=(analogRead(sensorT)*CONV_TEMP); //need other operation to get the temp value from a value which goes from 0 to 1024
+    sumTemp += tmpCurTemp;
+    delay(5);
   }
-
-  void getMsg(){
-  uint8_t *buf;
-  uint8_t buflen = 3;
-    if(trasm.recv(buf,&buflen)){
-              
-              if((buf[1] & TO_ME)==TO_ME){ //dal raspi
-                  if((buf[1] & ID)==ID){//sono io
-                    switch(buf[2] & COMMAND_BIT ) {
-                     
-                      case ASK_TEMP: {
-                        sendTemp();
-                        }                    
-                      
-                      case SET_TEMP:{
-                            chosenTemp=(buf[2] & GET_TEMP_BIT);
-                            sendOK();
-                            break;
-                            }
-                      case ON:{
-                        chosenTemp=(buf[2] & GET_TEMP_BIT);
-                        sendOK();
-                        break;
-                        }
-                      case OFF:{
-                        chosenTemp=0;
-                        sendOK();
-                        break;
-                        }                  
-                      }
-                  }
-              } 
+  digitalWrite(TEMPERATURE,LOW);  //stops giving current to the temperature sensor
+  //1 second lasted while acquiring data
+  curTemp=sumTemp/10;
+  if((status & 0b01000000) || forceManual) { // only in manual mode controls the temperature
+    if(10*curTemp<chosenTemp-30 )
+       digitalWrite(relay,HIGH);
+    if (10*curTemp>chosenTemp+30)
+       digitalWrite(relay,LOW);
+  }
+  else { // automatic mode. set heat and cooling based on the info from the raspberry/ESP8266
+   if(status & 0b00010000>0) //heat on, put the relay pin on high
+        digitalWrite(relay,HIGH);
+   else
+         digitalWrite(relay,LOW);
+  }
+  histTemp[4] = histTemp[3];histTemp[3] = histTemp[2];histTemp[2] = histTemp[1];
+  histTemp[0]=curTemp; //store this temperature
     
-    }
-  }
-void sendTemp(){
-  bool OK_rec=false;
-  uint8_t temp=(uint8_t)round(curTemp);
-  temp= ( SET_TEMP | temp); //bitwise or: gives the instruction and the temp
-  uint8_t msg[]={RASP_HEADER,temp};
-  uint8_t *buf;  
-  while(!OK_rec){
-    trasm.setModeTx();
-    trasm.send(msg,2);
-    trasm.waitPacketSent();
-    trasm.setModeRx();
-    delay(100);
-    if(trasm.recv(buf,&buflen) ){
-      if((buf[1] & TO_ME)==TO_ME){ //dal raspi
-                  if(((int)buf[1] & ID)==ID){//sono io
-                      if(buf[2] == OK_ANSWER)
-                          OK_rec=true;
-                  }
-        }
-    }
-  }
- }
+  // sleep for about 56s, then measures the temperature level
+  //sleep doesn't change the pin status (i.e. the relay stays HIGH or LOW while arduino is sleeping)
+  for(uint8_t sleep= 0; sleep < 7; sleep++ ){
+    //
+    byte old_ADCSRA = ADCSRA;
+    // disable ADC
+    ADCSRA = 0;  
+    set_sleep_mode(SLEEP_MODE_PWR_DOWN);  
+    sleep_enable();
+    sleep_cpu();
+    sleep_disable();
+    ADCSRA = old_ADCSRA;      
+        
+    // release TWI bus / I2C
+    TWCR = bit(TWEN) | bit(TWIE) | bit(TWEA) | bit(TWINT);
+    
+    // turn it back on again
+    Wire.begin(ARD_ID); 
+    TWAR = (ARD_ID << 1) | 1;  // enable broadcasts to be received
 
- void sendOK(){
-  
-  uint8_t msg[]={RASP_HEADER,OK_ANSWER};
-  trasm.setModeTx();
-  trasm.send(msg,2);
-  trasm.waitPacketSent();
-  trasm.setModeRx();  
- }
+   }
+   EEPROM.put(ADDR_TEMP, chosenTemp); // update EEPROM, if changed, with the new chosen temperature 
+   EEPROM.put(ADDR_STATUS, status);
+   
+}
+/*receive the data from the ESP8266 in the standard mode {inHome,manual,heatOn,coolOn,setTemp[4 bit]}
+ * Temperature is given in the range [15;31]°C, which is sufficient to set the heat and cooling system
+ */
+void receiveData(int numB){
+  byte data = Wire.read(); // 1 byte data (tempBit[5], in home/out[1], status[2])
+  uint8_t temperature = data & TEMP_MASK; // extract temperature
+  chosenTemp = temperature*10 + ZERO_TEMP; // transmit less data in coding the temperature
+  status = data & !TEMP_MASK; //the other 4 bits are for the status
+   
+}
+//send data on ESP8266 requests. Stupid version, need optimization
+void sendData(int numB){
+  uint8_t data[6];
+  data[0] = histTemp[0];data[1] = histTemp[1];data[2] = histTemp[2];
+  data[3] = histTemp[3];data[4] = histTemp[4];
+  data[5] = status;
+  Wire.write(data,6);
+}
+
+/* Code courtesy of "Coding Badly" and "Retrolefty" from the Arduino forum
+ * results are Vcc * 10
+ * So for example, 5V would be 50.
+ * - Exploits temp results, saves results into "status" var and in EEPROM
+ */
+void getBandgap () 
+  {
+  // REFS0 : Selects AVcc external reference
+  // MUX3 MUX2 MUX1 : Selects 1.1V (VBG)  
+   ADMUX = bit (REFS0) | bit (MUX3) | bit (MUX2) | bit (MUX1);
+   ADCSRA |= bit( ADSC );  // start conversion
+   while (ADCSRA & bit (ADSC))
+     { }  // wait for conversion to complete
+   uint8_t batt = (((InternalReferenceVoltage * 1024) / ADC) + 5) / 100; // range [0;50] 
+   //encode the value
+   uint8_t codedBatteryStatus;
+   if(batt > 45) { codedBatteryStatus= 0b11; }
+   else if(batt > 33) { codedBatteryStatus= 0b10; }
+   else if(batt > 30) { codedBatteryStatus= 0b1; }
+   else { codedBatteryStatus= 0b0; }
+   //store the battery status
+   uint8_t tmpStatus = EEPROM.read(ADDR_STATUS);
+   if((tmpStatus & 0b11)!= codedBatteryStatus){ //update battery status
+      tmpStatus = tmpStatus & 0b11111100; //reset battery info, keep other info
+      status = tmpStatus | codedBatteryStatus; //update status variable
+      EEPROM.update(ADDR_STATUS,status); // store it on eeprom if changed
+   }
+  } // end of getBandgap
+
 
