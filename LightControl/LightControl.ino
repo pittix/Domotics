@@ -7,12 +7,13 @@
 #define LDR A0 //light sesor
 #define PIR 0 //movement ir sensor
 #define RELAY 1
-#define LM35 A2 //temp sensor
+#define sensorT A2 //temp sensor
 
 //pin relay
 #define relay 0 
 #define FORCE_MANUAL 1
-#define TEMPERATURE 2
+#define TEMPERATURE  2
+
 
 //Transmission spec
 #define ARD_ID 0x50
@@ -37,10 +38,10 @@
 #define WAIT 7 //cycles of 8 seconds
 
 //EEPROM addresses
-#define ADDR_ID 1
-#define ADDR_TEMP   2 // address where temperature is set
-#define ADDR_STATUS 3 // address where the status is set (manual mode and cooling or heating is on)
-
+#define ADDR_ID     11
+#define ADDR_TEMP   12 // address where temperature is set
+#define ADDR_STATUS 13 // address where the status is set (manual mode and cooling or heating is on)
+#define ADDR_BATT   14
 bool isOut;
 uint8_t status;
 uint8_t histTemp[5];
@@ -86,20 +87,38 @@ void receiveData(int numB){
    
 }
 //send data on ESP8266 requests. Stupid version, need optimization
-void sendData(int numB){
+void sendData(){
   uint8_t data[6];
   data[0] = histTemp[0];data[1] = histTemp[1];data[2] = histTemp[2];
   data[3] = histTemp[3];data[4] = histTemp[4];
   data[5] = status;
   Wire.write(data,6);
 }
-
+/**
+ * Get the temperature of the room and returns the value
+ */
+uint8_t getTemp(){
+  digitalWrite(TEMPERATURE,HIGH);
+  float sumTemp=0;
+  uint8_t tmpCurTemp=0;
+  uint8_t curTemp=0;
+  float conversionFactor = float(EEPROM.read(ADDR_BATT)); //TODO current conversion factor. It depends on the battery level as there's no external reference
+  for(byte i=0; i<10;i++){ //The value is more precise
+    tmpCurTemp=(analogRead(sensorT)*conversionFactor); //need other operation to get the temp value from a value which goes from 0 to 1024
+    sumTemp += tmpCurTemp;
+    delay(5);
+  }
+  digitalWrite(TEMPERATURE,LOW);  //stops giving current to the temperature sensor
+  //1 second lasted while acquiring data
+  curTemp=sumTemp/10;
+  return curTemp;
+}
 /* Code courtesy of "Coding Badly" and "Retrolefty" from the Arduino forum
  * results are Vcc * 10
  * So for example, 5V would be 50.
  * - Exploits temp results, saves results into "status" var and in EEPROM
  */
-void getBandgap () 
+void getBattery () 
   {
   // REFS0 : Selects AVcc external reference
   // MUX3 MUX2 MUX1 : Selects 1.1V (VBG)  

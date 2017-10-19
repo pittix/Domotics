@@ -33,12 +33,13 @@
 #define CONV_TEMP 0.48828125 //LM35 converting from Analog input to celsius degrees
 
 //EEPROM addresses
-#define ADDR_ID 1
-#define ADDR_TEMP   2 // address where temperature is set
-#define ADDR_STATUS 3 // address where the status is set (manual mode and cooling or heating is on)
-
+#define ADDR_ID     11
+#define ADDR_TEMP   12 // address where temperature is set
+#define ADDR_STATUS 13 // address where the status is set (manual mode and cooling or heating is on)
+#define ADDR_BATT   14 //address where the battery voltage is stored
 volatile unsigned long counter = 0; //timer for sleeping
 const long InternalReferenceVoltage = 1062; // power voltage. Needed for temperature 
+const uint8_t battTolerance = 20; // 0.1 V tolerance
 uint8_t chosenTemp = 190; // default temperature, in integer, one decimal
 float curTemp;
 
@@ -66,7 +67,9 @@ void setup() {
     pinMode(TEMPERATURE,OUTPUT);
 
     pinMode(FORCE_MANUAL,INPUT);
+    EEPROM.update(ADDR_BATT, (uint8_t)250);  //for first iteration
     //re-initialize value if arduino is resetted
+    
     chosenTemp = EEPROM.read(ADDR_TEMP);
     status = EEPROM.read(ADDR_STATUS);
 }
@@ -90,21 +93,12 @@ void loop() {
     // turn it back on again
     Wire.begin(ARD_ID); 
     TWAR = (ARD_ID << 1) | 1;  // enable broadcasts to be received
-    getBandgap(); //every minute check the battery status
+    getBattery(); //every minute check the battery status
    }
+  
   forceManual = (digitalRead(FORCE_MANUAL)==HIGH); //check if I set in failsafe mode
   //enable temperature sensor (gives current)
-  digitalWrite(TEMPERATURE,HIGH);
-  float sumTemp=0;
-  uint8_t tmpCurTemp=0;
-  for(byte i=0; i<10;i++){ //The value is more precise
-    tmpCurTemp=(analogRead(sensorT)*CONV_TEMP); //need other operation to get the temp value from a value which goes from 0 to 1024
-    sumTemp += tmpCurTemp;
-    delay(5);
-  }
-  digitalWrite(TEMPERATURE,LOW);  //stops giving current to the temperature sensor
-  //1 second lasted while acquiring data
-  curTemp=sumTemp/10;
+  uint8_t curTemp = getTemp();
   if((status & 0b01000000) || forceManual) { // only in manual mode controls the temperature
     if(10*curTemp<chosenTemp-30 )
        digitalWrite(relay,HIGH);
@@ -112,7 +106,7 @@ void loop() {
        digitalWrite(relay,LOW);
   }
   else { // automatic mode. set heat and cooling based on the info from the raspberry/ESP8266
-   if(status & 0b00010000>0) //heat on, put the relay pin on high
+   if((status & 0b00010000)>0) //heat on, put the relay pin on high
         digitalWrite(relay,HIGH);
    else
          digitalWrite(relay,LOW);
@@ -156,20 +150,37 @@ void receiveData(int numB){
    
 }
 //send data on ESP8266 requests. Stupid version, need optimization
-void sendData(int numB){
+void sendData(){
   uint8_t data[6];
   data[0] = histTemp[0];data[1] = histTemp[1];data[2] = histTemp[2];
   data[3] = histTemp[3];data[4] = histTemp[4];
   data[5] = status;
   Wire.write(data,6);
 }
-
+/**
+ * Get the temperature of the room and returns the value
+ */
+uint8_t getTemp(){
+  digitalWrite(TEMPERATURE,HIGH);
+  float sumTemp=0;
+  uint8_t tmpCurTemp=0;
+  float conversionFactor = float(EEPROM.read(ADDR_BATT)); //TODO current conversion factor. It depends on the battery level as there's no external reference
+  for(byte i=0; i<10;i++){ //The value is more precise
+    tmpCurTemp=(analogRead(sensorT)*conversionFactor); //need other operation to get the temp value from a value which goes from 0 to 1024
+    sumTemp += tmpCurTemp;
+    delay(5);
+  }
+  digitalWrite(TEMPERATURE,LOW);  //stops giving current to the temperature sensor
+  //1 second lasted while acquiring data
+  curTemp=sumTemp/10;
+  return curTemp;
+}
 /* Code courtesy of "Coding Badly" and "Retrolefty" from the Arduino forum
  * results are Vcc * 10
  * So for example, 5V would be 50.
  * - Exploits temp results, saves results into "status" var and in EEPROM
  */
-void getBandgap () 
+void getBattery () 
   {
   // REFS0 : Selects AVcc external reference
   // MUX3 MUX2 MUX1 : Selects 1.1V (VBG)  
@@ -177,12 +188,12 @@ void getBandgap ()
    ADCSRA |= bit( ADSC );  // start conversion
    while (ADCSRA & bit (ADSC))
      { }  // wait for conversion to complete
-   uint8_t batt = (((InternalReferenceVoltage * 1024) / ADC) + 5) / 100; // range [0;50] 
+   uint8_t batt = (((InternalReferenceVoltage * 1024) / ADC) + 5) / 20; // range [0;250] the voltage is 20 times lower (e.g. 5V is 250 = 500/2) so about 2 digits are stored
    //encode the value
    uint8_t codedBatteryStatus;
-   if(batt > 45) { codedBatteryStatus= 0b11; }
-   else if(batt > 33) { codedBatteryStatus= 0b10; }
-   else if(batt > 30) { codedBatteryStatus= 0b1; }
+   if(batt > 90) { codedBatteryStatus= 0b11; } //4.5V
+   else if(batt > 66) { codedBatteryStatus= 0b10; } // 3.3V
+   else if(batt > 60) { codedBatteryStatus= 0b1; }//3V
    else { codedBatteryStatus= 0b0; }
    //store the battery status
    uint8_t tmpStatus = EEPROM.read(ADDR_STATUS);
@@ -190,6 +201,10 @@ void getBandgap ()
       tmpStatus = tmpStatus & 0b11111100; //reset battery info, keep other info
       status = tmpStatus | codedBatteryStatus; //update status variable
       EEPROM.update(ADDR_STATUS,status); // store it on eeprom if changed
+      uint8_t battStored = EEPROM.read(ADDR_BATT);
+      if (!(battStored > batt - battTolerance && battStored < batt - battTolerance )){
+        EEPROM.update(ADDR_BATT, batt);
+      }
    }
   } // end of getBandgap
 
