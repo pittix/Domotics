@@ -1,87 +1,184 @@
 /**
- * ESP8266 code. The chip need to do:
+ * ESP8266 code.  
  * 
- * [list copied from other PC]
+ * This sketch allows to connect, via WiFi, to the Raspberry pi 1B and via I2C to the ATMega328p.
+ * The code allows the controller to
+ *  - check the temperature and store it
+ *  - store information for other arduinos 
+ *  - allow to update the connected ATMega via I2C [probably]
+ *  - allow OTA updates via the Raspberry
+ *  - send the information stored to the raspberry
+ *  - sleep the rest of the time
+ *
+ * The SPIFFS filesystem is organized as follows:
+ * - /down/<arduino addr>.bin           the firmware to be uploaded to an arduino
+ * - /down/ota.bin                      the firmware for this ESP8266
+ * - /temp/<arduino addr>.temp      the temperature file for each arduino
+ * - /stat/<arduino addr>.st            the status file of each arduino
+ * - /conf/<arduino addr>.cfg               the config assigned by the controller to each arduino
+ * - /conf/addresses.cfg                    the I2C addresses of each arduino, one per line
+ * - /wifi/wpa.txt                          the credentials of the wifi. SSID is first row, pwd is second. Formatted as string
+ * - /wifi/ip.bin                           the ip addr, gateway and netmask. bytes[0:3] are ip, [4:7] are gw and [7:10] are the netmask
  * 
- * Uses https://github.com/bblanchon/ArduinoJson to parse JSON from and to the raspberry
+ * Uses: 
+ *  - https://github.com/bblanchon/ArduinoJson to parse JSON from and to the raspberry
+ *  - Wire to communicate to the arduinos attached
+ *  - ESP8266WiFi to communicate via WiFi
+ *  - 
  * 
  * 
  */
 
-// I2C addresses of the arduinos connected
-#define ARD_SMALL_BATH 0x10
-#define ARD_BIG_BATH 0x11
-#define ARD_PARENT 0x12
-#define ARD_CHILD 0x13
-#define ARD_OFFICE 0x14
-#define ARD_LIVING 0x15
-#define ARD_ENTRANCE 0x16
-#define ARD_KITCHEN 0x17
+// I2C addresses of the arduinos connected. Not used as addresses are stored in spiffs
+//#define ARD_SMALL_BATH 0x10
+//#define ARD_BIG_BATH 0x11
+//#define ARD_PARENT 0x12
+//#define ARD_CHILD 0x13
+//#define ARD_OFFICE 0x14
+//#define ARD_LIVING 0x15
+//#define ARD_ENTRANCE 0x16
+//#define ARD_KITCHEN 0x17
 
-#define TRANSMISSION_OK 4
+#define TRANSMISSION_OK 0
 //Arduinos data constants
 #define ARD_N 5 //number of arduinos connected to ESP
 #define ARD_DATA_LEN 6 //byte
 
+//sleep time (in micro seconds)
+#define SLEEP_TIME 300e6 // 5 minutes sleep. Duty cycle should be around 1%
+
 #include "ArduinoJson.h"
-#define ARDUINOJSON_ENABLE_PROGMEM 1 //fix problem
+//#define ARDUINOJSON_ENABLE_PROGMEM 1 //fix problem
 
 #include <Wire.h>
 #include<ESP8266WiFi.h>
-
+#include <FS.h> // write into the 3M SPIFFS
 
 //arduino data variable
-uint8_t ardData[ARD_N][ARD_DATA_LEN];
+uint8_t ARD_ADDRESSES[ARD_N];// =  { ARD_SMALL_BATH, ARD_BIG_BATH, ARD_PARENT,
+                                   //ARD_CHILD,      ARD_OFFICE};
+const char *dataPath = "/data/"; 
+//WiFi connection parameters
+char* ssid;
+char* pwd;
+char* myJsonD; // the path where to retrieve the file
+char* myJsonU; // the path where to upload the file
+uint8_t ip[4];// = {192,168,1,10};
+uint8_t gw[4];// = {192,168,1,1};
+uint8_t netmask[4];// = {255,255,255,0};
 
-char* ssid = "SSID";
-char* pwd = "PASSWD";
-uint8_t ip[4] = {192,168,1,10};
-uint8_t gw[4] = {192,168,1,1};
-uint8_t netmask[4] = {255,255,255,0};
+WiFiClient client;
 
-//JSON library
-StaticJsonBuffer<400> jsonBuffer;
-
+//SPIFFS memory (3MB max) allocation files
+const char* fwPath = "/down/";
+const char* wifiPath = "/wifi/wpa.txt";
+const char* ipPath = "/wifi/ip.bin";
+const char* confPath = "/conf/";
+const char* jsonPath = "/conf/json.cfg";
+const char* addrPath = "/conf/addresses.cfg";
+const char* statusPath = "/stat/";
+const char* tempPath = "/temp/";
 
 void setup() {
+  loadVars();
   //saves data from the arduino
   for(uint8_t i=1;i<ARD_N;i++){
 //    ardData[i] = receiveArduinoData()  ;
     delay(100);// 100 ms between one request and the other
   }
   connectWifi();
-  String JsonData = requestControllerData();
+  requestControllerData();
   WiFi.mode(WIFI_OFF);
-  decodeJSON(JsonData);
+  decodeJSON();
   setSleep();
   
 }
+void loadVars(){
+  SPIFFS.begin(); //mount fs
+  //connection parameters
+  File ipF = SPIFFS.open(ipPath, "r");
+  for(uint8_t i=0;i<12;i++){
+    if(i<4){
+    ip[i]=ipF.read();
+    }
+    else if(i<8){
+      gw[i-4]=ipF.read();
+    }
+    else{
+      netmask[i-8]=ipF.read();
+    }
+  }
+  File wpaF = SPIFFS.open(wifiPath, "r");
+  String tmp = wpaF.readStringUntil('\n');
+  uint8_t tmpL = tmp.length();
+  tmp.toCharArray(ssid,tmpL);
+  tmp  = wpaF.readStringUntil('\n');
+  tmpL = tmp.length();
+  tmp.toCharArray(pwd,tmpL);
 
-/* Useless as the controller sleeps almost all the time and to wake it, I need to reset it. 
- *  All the code is inside the setup() and the functions called inside
- */
-void loop() {}  
+  //arduino addresses on I2C
+  File addrF = SPIFFS.open(addrPath, "r");
+  for(uint8_t i=0;i<ARD_N;i++){
+    ARD_ADDRESSES[i]=addrF.read();
+  }
 
-String requestControllerData(){return "";}
-
-//uint8_t[][6] decodeJSON(String in){
-//  uint8_t out[ARD_N][ARD_DATA_LEN];
-//  return out;
-//}
-
-uint8_t decodeJSON(String JsonData){
-    JsonObject* data = jsonBuffer.parse(JsonData);
-    return 0;
+  //JSON filename
+  File jsonF = SPIFFS.open(jsonPath, "r");
+  tmp = jsonF.readStringUntil('\n');
+  tmpL = tmp.length();
+  tmp.toCharArray(myJsonD,tmpL);  
+  
+  tmp = jsonF.readStringUntil('\n');
+  tmpL = tmp.length();
+  tmp.toCharArray(myJsonU,tmpL); 
 }
+
+void requestControllerData(){
+  if(WiFi.status() != WL_CONNECTED){
+    connectWifi(); // reconnect
+  }
+  
+  File jSon = SPIFFS.open(F("/tmp.json"), "w");//temp file
+  client.connect(gw, 21); //raspberry is the gatewayù
+  //retrieve json file
+  client.print(F("RETR "));
+  client.println(myJsonD);
+  client.print(F("STOR "));
+  client.println(myJsonU);
+  //end connection
+  client.println(F("QUIT"));
+}
+/**
+ * The JSON is structured as follows 
+ * - 1 value per each arduino containing the settings to send to each arduino
+ * - 1 url per each arduino where to find the code to upload. if the url is empty, no update is available 
+ * - 1 url where to find the OTA for the ESP. If the url is empty, no value is given
+ */
+uint8_t decodeJSON(){}
+//    StaticJsonBuffer<400> jsonBuffer;
+//    JsonObject &data = jsonBuffer.parseObject(JsonData);
+//    /**
+//     * Update the configuration of each arduino
+//     */
+//    for(uint8_t i =0;i<ARD_N;i++){
+//      ardSetup[i] = data[String(i)+"c"];
+//      if(data[String(i)+"u"] !=""){
+//        
+//      }
+//        
+//    }
+//    return 0;
+//}
 /**
  * encode the data to be raspberry-readable
  * return the string with the json data
  */
-String encodeJSON(int data[]){
+const char* encodeJSON(int data[]){
   String out;
+  StaticJsonBuffer<400> jsonBuffer;
   JsonObject* parser = &jsonBuffer.createObject();
   JsonObject* ardParser = &jsonBuffer.createObject();
-  
+  uint8_t ardData[3][4];
   for(uint8_t i=1;i<=ARD_N;i++){
     for(uint8_t j=1;j<ARD_DATA_LEN;j++){ 
       (*ardParser)[String(j)] = (char*)ardData[i][j]; // convert each temp into string. the temp number is the acquisition number
@@ -93,7 +190,7 @@ String encodeJSON(int data[]){
     ardParser = &jsonBuffer.createObject(); // reset the parser to accept new values 
   }
    parser->printTo(out); // creates the string with all the data
-   return out;
+   return out.c_str();
 }
 
 /**
@@ -121,20 +218,16 @@ uint8_t* receiveArduinoData(uint8_t addr){
   Wire.beginTransmission(addr);
   uint8_t data[ARD_DATA_LEN+3]; //just in case
   uint8_t i=0;
-  uint8_t out[ARD_DATA_LEN];
-  while(Wire.available()>0){
-      data[i] = Wire.read();
-      i++;
-  }
-  if(data[ARD_DATA_LEN]|data[ARD_DATA_LEN+1]|data[ARD_DATA_LEN+2] ==0){
-    for(uint8_t i =0;i<ARD_DATA_LEN;i++){
-      out[i] = data[i];
-    }
-    return out;
-  }
-  else{
-    return data;
-  }
+ 
+//  while(Wire.available()>0){
+//      data[i] = Wire.read();
+//      i++;
+//  }
+//  // discard last 3 bytes. 
+//  for(uint8_t i =0;i<ARD_DATA_LEN;i++){
+////    out[i] = data[i];
+//  }
+//    return 0;
 }
 /**
  * connect to wifi and then return. Use a static IP address
@@ -148,6 +241,22 @@ void connectWifi(){
 
 }
 /**
- * Put the ESP to sleep for a fixed amount of time and 
+ * Put the ESP to sleep for a fixed amount of time and then wake up as just started
  */
-void setSleep(){}
+void setSleep(){
+  ESP.deepSleep(SLEEP_TIME, WAKE_RF_DEFAULT);
+  }
+
+/**
+ * download and store in memory the arduino firmware update file so that it will be flashed later
+ */
+void storeArduinoUpdate(uint8_t addr){
+  // SPIFFS.open(path + String(addr),w);
+  
+
+}
+
+/* Useless as the controller sleeps almost all the time and to wake it, I need to reset it. 
+ *  All the code is inside the setup() and the functions called inside
+ */
+void loop() {}  
