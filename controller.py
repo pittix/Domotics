@@ -42,7 +42,7 @@ class DatabaseActions():
             curs.execute("CREATE TABLE rooms(id integer primary key,name varchar unique, device integer, isEsp blob)")
             curs.execute("CREATE TABLE arduinos(id integer primary key,room integer unique, status blob , esp_num integer)")
             curs.execute("CREATE TABLE esp(id integer primary key,room varchar unique, name varchar unique, status blob , esp_ip text, esp_dataKey varchar,esp_ivKey varchar,esp_passphrase varchar, esp_staticIV varchar)")
-            curs.execute("CREATE TABLE recordedTemperature(id integer primary key,temperature float,station integer, isEsp blob)")
+            curs.execute("CREATE TABLE recordedTemperature(id integer primary key,temperature float,station integer, isEsp blob,recordTime varchar)")
             curs.execute("CREATE TABLE setTemperature(id integer primary key,temperature float,room integer, isEsp blob)")
             #ROOM TABLE
             rooms = [(NULL, "parents",NULL,NULL),(NULL, "child",NULL,NULL), (NULL, "bathroomBig",NULL,NULL),(NULL, "bathroomSmall",NULL,NULL),(NULL, "homeoffice",NULL,NULL),(NULL, "entrance",NULL,NULL),(NULL, "livingroom",NULL,NULL)]
@@ -87,12 +87,25 @@ class ConnectionHandler(self):
 
 
     def sendTo(espName):
-        """sends encrypted data to a specific esp. there's one byte for each connected arduino"""
-        (data,key,iv) = get_data_from_db(espName,DATA_CONFIG)
-        encr = aes.new(key,mode=aes.MODE_CBC,IV=iv) # create the cypher
+        """sends encrypted data to a specific esp. there's one byte for each connected arduino preceded by one byte identifying it """
+        (dataK,IV_K,passphrase,staticIV)=db_conn.get_data_from_db(espName,DATA_CYPHER)
 
+        dataConf = db_conn.get_data_from_db(espName,DATA_CONFIG)
         #cypher data
-
+        iv =0 #need to generate an IV for the cypher
+        #enc IV
+        encIV = aes.new(IV_K,mode=aes.MODE_CBC,IV=staticIV) # create the cypher
+        iv_enc = encIV.encrypt(iv)
+        #decr cliID with iv
+        encCliID =aes.new(dataK,mode=aes.MODE_CBC,IV=iv) # create the cypher
+        cliID_enc = encCliID.encrypt(Byte('r'))
+        #decr data
+        encrData =aes.new(dataK,mode=aes.MODE_CBC,IV=iv) # create the cypher
+        data_enc = encrData.encrypt(dataConf)
+        message=s.join([iv_enc,cliID_enc,data_enc])
+        hmac = HMAC.new(passphrase,message,SHA)
+        computed_hash = hmac.hexdigest()
+        data=s.join([iv_enc,cliID_enc,data_enc,computed_hash])
         #send data to the esp
         mqtt_broker.publish(espName,data)
 
@@ -138,22 +151,18 @@ class ConnectionHandler(self):
                 isEsp = True
             else:
                 isEsp=False
-
+            recordTimes=[]
             deltaAcq = dt.timedelta(minutes=1)#prepare to store the data acquired with 1 minutes delay
             for j in range(len(temp)):
                 temperatures.append( int(temp[j])/10.0 )
+                recordTimes.append((now-j*deltaAcq)) # time when the temperature was acquired
             #store data into db
             roomID=db_conn.execute("SELECT room FROM arduinos WHERE id is ?",ardID)
-            db_conn.executemany("INSERT INTO recordedTemperature VALUES (NULL,?,?,?)",temperatures,roomID,isEsp)
+            db_conn.executemany("INSERT INTO recordedTemperature VALUES (NULL,?,?,?,?)",temperatures,roomID,isEsp,recordTimes)
             db_conn.commit() #executes the storing of recorded temperatures
 
 
 
-
-    def mqtt_start(self):
-        #start to be a broker and subscribe to all topics
-        #
-        return
     def update_key_ivs(self,espN):
         """Periodically update the keys and the IVs of each ESP to avoid collisions"""
         return
