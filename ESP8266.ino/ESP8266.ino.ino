@@ -138,7 +138,8 @@ void loadVars() {
   //arduino addresses on I2C
   File addrF = SPIFFS.open(addrPath, "r");
   for (uint8_t i = 0; i < ARD_N; i++) {
-    ARD_ADDRESSES[i] = addrF.read();
+    ARD_ADDRESSES[i] = addrF.readStringUntil(' ');
+    addrF.readStringUntil('\n');//ignore the 
   }
   addrF.close();
 
@@ -315,7 +316,52 @@ void storeArduinoUpdate(uint8_t addr) {
 
 
 }
+/**
+ * Scan the connected arduinos and stores the data into /conf/addresses.conf in the format
+ * 0x<ADDR><space><Serial Number>
+ */
+void connectedArduinos(){
+  byte error,devFound;
+  byte buf[4]; //serial number store
+  unsigned long SN=0;
+  String formatted;
+  //open the file
+  if (SPIFFS.exists(addrPath)) {
+    SPIFFS.remove(addrPath);
+  }
+  File addr = SPIFFS.open(addrPath, "w");
 
+  //Wake all arduinos if they're sleeping
+  Wire.beginTransmission(0);
+  Wire.endTransmission();
+  delay(200); //wait for the arduinos to wake up
+  for(uint8_t i=1;i<127;i++){
+    Wire.beginTransmission(i);
+    errCode=Wire.endTransmission();
+    if(errCode==0){//No error means that the device was found
+      Wire.requestFrom(i,4); //the serial number is an unsigned long
+      for(uint8_t j=0;j<4;j++){
+        buf[j] = Wire.read();
+      }
+      //generates the long
+      SN+= (buf[0] << 24); 
+      SN+= (buf[1] << 16); 
+      SN+= (buf[2] << 8); 
+      SN+= (buf[3] ); 
+      if(devFound==0){
+        formatted = String(i,HEX)+String(SN) ;
+      }
+      else{
+        formatted += '\n'+String(i,HEX)+String(SN) ;
+      }
+      devFound++;
+    }
+  }
+  //write the data at the end, so that the number of writing is reduced
+  addr.write(formatted);
+  addr.close();
+  
+}
 /* Useless as the controller sleeps almost all the time and to wake it, I need to reset it.
     All the code is inside the setup() and the functions called inside
 */
