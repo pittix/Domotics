@@ -60,7 +60,7 @@ void setup() {
 //  
 }
 void loop() {
-  
+   
    int light = analogRead(LDR);
    if(!isOut){
       if(digitalRead(PIR)==HIGH){
@@ -76,7 +76,7 @@ void loop() {
    else {
      digitalWrite(RELAY,LOW);
    }
-
+  
 
 }
 

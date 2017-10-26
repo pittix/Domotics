@@ -1,0 +1,17 @@
+#import<PubSubClient.h>
+void setup(){
+  cli= PubSubClient (server, port, [callback function], client);
+  bool connRes = cli.connect (clientID, willTopic, willQoS, willRetain, willMessage); // will message is unknown
+
+//QOS = 0 UDP style, no guarantee of reception (no ack)
+//QOS = 1 guarantee of reception (ack), but multiple reception can happen
+  cli.subscribe(topic,[QOS]);
+  cli.publish(topic,payload);
+  bool isConn = cli.connected();
+  int state(); 0 ok, negative is not connected, positive connected but failures on broker
+
+  cli.disconnect()
+
+}
+//      name of func          topic name        array of bytes    length of payload. pointer may not work for long (overwritten data)
+  void [callback function](const char[] topic, byte* payload, unsigned int length)
