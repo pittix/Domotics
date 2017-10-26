@@ -26,6 +26,11 @@ class DatabaseActions():
     self.DATA_CYPHER=1
     self.DATA_CYPHER_CONFIG=2
     self.DATA_ESP_NAMES=3
+    self.DATA_ROOM = 4
+    #store values
+    self.DATA_TEMP = 5
+    self.DATA_STATUS = 6
+
 
     def database_connect(self):
         #apparently it creates automatically the db, so I create tables needed
@@ -38,38 +43,68 @@ class DatabaseActions():
             curs = conn.cursor()
             return curs
         else:
-            #table creation
-            curs.execute("CREATE TABLE rooms(id integer primary key,name varchar unique, device integer, isEsp blob)")
-            curs.execute("CREATE TABLE arduinos(id integer primary key,room integer unique, status blob , esp_num integer)")
-            curs.execute("CREATE TABLE esp(id integer primary key,room varchar unique, name varchar unique, status blob , esp_ip text, esp_dataKey varchar,esp_ivKey varchar,esp_passphrase varchar, esp_staticIV varchar)")
-            curs.execute("CREATE TABLE recordedTemperature(id integer primary key,temperature float,station integer, isEsp blob,recordTime varchar)")
+            #table creation -- TIP createIfNotExists
+            curs.execute("CREATE TABLE rooms(id integer primary key,name varchar unique, device integer, isEsp boolean )")
+            curs.execute("CREATE TABLE arduinos(id integer primary key,room integer foreign key rooms.id , status integer , espID integer)")
+            curs.execute("CREATE TABLE esp(id integer primary key, room integer foreign key rooms.id, name varchar unique, status integer , esp_ip varchar, esp_dataKey varchar,esp_ivKey varchar,esp_passphrase varchar, esp_staticIV varchar)")
+            curs.execute("CREATE TABLE recordedTemperature(id integer primary key,temperature float,station integer, isEsp boolean ,recordTime datetime)")
             curs.execute("CREATE TABLE setTemperature(id integer primary key,temperature float,room integer, isEsp blob)")
             #ROOM TABLE
             rooms = [(NULL, "parents",NULL,NULL),(NULL, "child",NULL,NULL), (NULL, "bathroomBig",NULL,NULL),(NULL, "bathroomSmall",NULL,NULL),(NULL, "homeoffice",NULL,NULL),(NULL, "entrance",NULL,NULL),(NULL, "livingroom",NULL,NULL)]
             rooms.append([ (NULL, "kitchen",NULL,NULL), (NULL, "preBedroom",NULL,NULL) ])
-
+            #fill tables
+            curs.executemany("INSERT INTO rooms VALUES(NULL,?,?,)")
+            #update status from arduino name
+            curs.execute("UPDATE arduinos SET status=? WHERE id=?",status,ardID)
+            curs.execute("DELETE FROM arduinos WHERE id=?",status,ardID)
             #ESP TABLE
             esps=[(1,NULL,NULL,"192.168.1.11"),(2,NULL,NULL,"192.168.1.12"),(1,NULL,NULL,"192.168.1.13")]
             return curs
 
     def get_data_from_db(self,espN,reqType):
-        cursor = database_connect()
-        if(reqType == DATA_CONFIG):
+        """ return the data from the database regarding an ESP or ARDUINO, depending on the data type
+        if the type is:
+            DATA_CONFIG, returns the
+            DATA_CIPHER, returns the keys for both the IV and the data and the passphrase to generate the hash of the message
+            DATA_CIPHER_CONFIG returns together the two before
+            DATA_ESP_NAMES return the name of all the ESPs
+            DATA_ROOM return the room id to which an arduino is connected
+            DATA_ROOM_ALL returns a list of tuples with (arduinoID,roomID)
+        """
+        cursor = self.database_connect()
+        if(reqType == self.DATA_CONFIG):
             ret = cursor.execute("SELECT id FROM esp WHERE name is ? ",topic)
-        elif(reqType == DATA_CIPHER):
+        elif(reqType == self.DATA_CIPHER):
             #data request
             ret = cursor.execute("SELECT esp_dataKey,esp_ivKey,esp_passphrase,esp_staticIV FROM esp WHERE name is ? ",topic)
-        elif(reqType == DATA_CIPHER_CONFIG):
+        elif(reqType == self.DATA_CIPHER_CONFIG):
             ret = cursor.execute("SELECT id,esp_dataKey,esp_ivKey,esp_passphrase,esp_staticIV FROM esp WHERE name is ? ",topic)
             arduinos = cursor.execute("SELECT id FROM arduinos WHERE esp_num IS ? ",ret[0])
-        elif(reqType == DATA_ESP_NAMES):
-            ret cursor.execute("SELECT name FROM esp")
-
+        elif(reqType == self.DATA_ESP_NAMES):
+            ret= cursor.execute("SELECT name FROM esp")
+        elif(reqType == self.DATA_ROOM):
+            ret = cursor.execute("SELECT roomID FROM arduinos WHERE espID IS ? ",espN)
+        elif(reqType == self.DATA_ROOM_ALL):
+            ret = cursor.execute("SELECT id,roomID FROM arduinos")
+        else:
+            log.warning("In DatabaseActions.get_data_from_db no valid type was given, %s ",reqType)
+        cursor.execute("SELECT esp.id,arduinos.id FROM esp LEFT JOIN arduinos ON esp.id=arduinos.espID WHERE esp.name=?",espN)
         #disconnect from db
         cursor.disconnect()
         return ret
-    def store_data_to_db(self,ardN,data):
-        """Expect ardN as the id of the arduino and data as the data from the ESP regarding a specific arduino. If ardN is a list, data must be a dictionary of lists where the key fied of the dictionary is the id of the arduino and the value is the data bytes regarding that arduino"""
+    def store_data_to_db(self,ardN,data, dataType):
+        """Expect ardN as the id of the arduino and data as the data from the ESP regarding a specific arduino. If ardN is a list, data must be a dictionary of lists where the key fied of the dictionary is the id of the arduino and the value is the data bytes regarding that arduino.
+        if dataType is:
+             DATA_TEMP, value must be given in a list of tuples like (temperature,ardID,isESP,time)"""
+        conn=self.database_connect().cursor()
+        if(dataType == self.DATA_TEMP):
+            for el in data:
+            conn.execute("INSERT INTO recordedTemperature VALUES (NULL,?,?,?,?)",el[0],el[1],el[2],el[3])
+        elif(dataType == self.DATA_STATUS):
+            conn.execute("UPDATE TABLE arduinos WHERE ardID IS ?  VALUE status=?",ardID,data) #TODO check!!
+        else:
+            log.warning("In DatabaseActions.store_data_to_db no valid type was given, %s ",dataType)
+
 class ConnectionHandler(self):
     self.conn=None
     #edit for your configuration. socket of the mqtt broker
@@ -85,6 +120,7 @@ class ConnectionHandler(self):
         for sub in subscription:
             mqtt.subscribe(sub,1) #receive temperature from each arduino
 
+        #on_message of the heating system. Messages from the ESP connected to the boiler. Special parsing
 
     def sendTo(espName):
         """sends encrypted data to a specific esp. there's one byte for each connected arduino preceded by one byte identifying it """
