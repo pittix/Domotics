@@ -8,56 +8,73 @@
 
 import  os.path, sqlite3, logging
 import Crypto.Cipher.AES as aes
-import Crypto.Ciph as cyph
+import Crypto.Cipher as cyph
 from Crypto.Hash import SHA, HMAC
 import binascii
 import paho.mqtt.client as mqtt
-import datetime.datetime as dt
+from datetime import datetime as dt
+import ipaddress as ip
 
-DB_FILE = "/home/pittix/hdd/uni2/Domotics/controller/database.sqlite" # database sqlite3 file
+# DB_FILE = "/home/pittix/hdd/uni2/Domotics/controller/database.sqlite" # database sqlite3 file
+DB_FILE = "/home/pittix/Archivi/Domotics/database.sqlite" # database sqlite3 file
 IVLEN = 16 #number of hex digits for the initialization vector
 class MainController():
-
+    pass
 
 
 class DatabaseActions():
     #db constants
-    self.DATA_CONFIG=0
-    self.DATA_CYPHER=1
-    self.DATA_CYPHER_CONFIG=2
-    self.DATA_ESP_NAMES=3
-    self.DATA_ROOM = 4
+    DATA_CONFIG=0
+    DATA_CYPHER=1
+    DATA_CYPHER_CONFIG=2
+    DATA_ESP_NAMES=3
+    DATA_ROOM = 4
     #store values
-    self.DATA_TEMP = 5
-    self.DATA_STATUS = 6
-    self.DATA_UPDATE_ALL=7
+    DATA_TEMP = 5
+    DATA_STATUS = 6
+    DATA_UPDATE_ALL=7
 
 
     def database_connect(self):
         #apparently it creates automatically the db, so I create tables needed
-        if(os.isfile(DB_FILE)):
+        print("entrato")
+        if(False):
+            print("dentro isfile")
             try:
-                conn = sqlite3.connect(db_file)
+                conn = sqlite3.connect(DB_FILE)
                 print(sqlite3.version)
             except Error as e:
                 print(e)
             curs = conn.cursor()
             return curs
         else:
+            print("dentro else")
             #table creation -- TIP createIfNotExists
-
+            conn = sqlite3.connect(DB_FILE)
+            curs = conn.cursor()
             #rooms name, data must be inserted manually
-            curs.execute("CREATE TABLE rooms(id integer primary key,name varchar unique )")
+            curs.execute("CREATE TABLE IF NOT EXISTS rooms(id integer primary key, name text unique )")
             #arduinos table. data can be initialized manually or derived from esp
-            curs.execute("CREATE TABLE arduinos(id integer primary key,SN varchar,room integer foreign key rooms.id , status integer , espID integer,curConfig integer,controlsZone integer unique)")
+            curs.execute('''CREATE TABLE  IF NOT EXISTS
+                arduinos(id integer primary key,SN text,room integer , status integer,
+                espID integer,curConfig integer,controlsZone integer, foreign key (room) REFERENCES rooms(id))''')
             #esp list. data should be initialized at the beginning
-            curs.execute("CREATE TABLE esp(id integer primary key, room integer foreign key rooms.id, name varchar unique, status integer , esp_ip varchar, esp_dataKey varchar,esp_ivKey varchar,esp_passphrase varchar, esp_staticIV varchar)")
+            curs.execute('''CREATE TABLE  IF NOT EXISTS esp(id integer primary key,
+                room integer, name text unique, status integer , esp_ip text,
+                esp_dataKey text,esp_ivKey text,esp_passphrase text, esp_staticIV text,
+                foreign key (room) REFERENCES rooms(id))''')
             #stores the temperatures
-            curs.execute("CREATE TABLE recordedTemperature(id integer primary key,temperature float,station integer foreign key arduinos.id, isEsp boolean ,recordTime timestamp)")
+            curs.execute('''CREATE TABLE  IF NOT EXISTS recordedTemperature(id integer primary key,
+                    temperature float,arduinoID integer, isEsp boolean,
+                    recordTime timestamp, foreign key (arduinoID) REFERENCES arduinos(id) )''')
             #current configuration for each arduino and ESP
-            curs.execute("CREATE TABLE setConfig(id integer primary key,minTemp float,maxTemp float, room integer foreign key rooms.id, roomEnabled boolean,isEsp boolean)")
+            curs.execute('''CREATE TABLE  IF NOT EXISTS setConfig(id integer primary key,
+                        minTemp float,maxTemp float, room integer, roomEnabled boolean,
+                        isEsp boolean,foreign key (room) REFERENCES rooms(id))''')
             #program some temperatures
-            curs.execute("CREATE TABLE program(id integer primary key,minTemp float,maxTemp float, room integer foreign key rooms.id, startTime timestamp, endTime timestamp)")
+            curs.execute('''CREATE TABLE  IF NOT EXISTS program(id integer primary key,minTemp float,maxTemp float,
+             room integer, startTime timestamp, endTime timestamp,foreign key (room) REFERENCES rooms(id))''')
+            conn.commit()
             return curs
 
     def get_data_from_db(self,espN,reqType):
@@ -99,22 +116,22 @@ class DatabaseActions():
         conn=self.database_connect().cursor()
         if(dataType == self.DATA_TEMP):
             for el in data:
-            conn.execute("INSERT INTO recordedTemperature VALUES (NULL,?,?,?,?)",el[0],el[1],el[2],el[3])
+                conn.execute("INSERT INTO recordedTemperature VALUES (NULL,?,?,?,?)",el[0],el[1],el[2],el[3])
         elif(dataType == self.DATA_STATUS):
             conn.execute("UPDATE TABLE arduinos WHERE ardID IS ?  VALUE status=?",ardID,data) #TODO check!!
         else:
             log.warning("In DatabaseActions.store_data_to_db no valid type was given, %s ",dataType)
 
-class ConnectionHandler(self):
-    self.conn=None
+class ConnectionHandler():
     #edit for your configuration. socket of the mqtt broker
-    self.broker_IP=ip.ip_address('127.0.0.1')
-    self.broker_port = 1883
-    self.db_conn = DatabaseActions()
+    broker_IP=ip.ip_address('127.0.0.1')
+    broker_port = 1883
 
 
     def __init__(self):
-        conn=mqtt.connect(broker_IP,broker_port,keepalive=30,bind_address=127.0.0.1)
+        self.db_conn = DatabaseActions()
+
+        self.conn=mqtt.connect(broker_IP,broker_port,keepalive=30,bind_address="127.0.0.1")
 
         subscription =db_conn.get_data_from_db(None,reqType=DATA_ESP_NAMES)
         for sub in subscription:
@@ -207,8 +224,8 @@ class ConnectionHandler(self):
     # def update_arduinos(self,topic,message):
     #     """Add arduinos connected to an ESP, so that the arduino """
     #     return
-class DecisionMaker(self):
-    self.db_conn() = DatabaseActions()
+class DecisionMaker():
+    db_conn = DatabaseActions()
     def update_arduino_config(self,espN):
         """From the new data in the database, update the arduino config and store it in the database"""
         db_conn.connect()
@@ -235,3 +252,7 @@ class DecisionMaker(self):
 def __main__():
     ConnectionHandler.mqtt_start()
     DatabaseActions.database_connect()
+
+if __name__ == "__main__":
+    db=DatabaseActions()
+    db.database_connect()
