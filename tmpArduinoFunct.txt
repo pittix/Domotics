@@ -15,3 +15,23 @@ void setup(){
 }
 //      name of func          topic name        array of bytes    length of payload. pointer may not work for long (overwritten data)
   void [callback function](const char[] topic, byte* payload, unsigned int length)
+
+
+temperature
+setConfig(rooms)->rooms(temperatures,enabled) -> arduinos(controlsZone !=0) -> arduins(curConfig)
+
+luci
+setConfig(all rooms)->rooms.id=arduino.room->arduino.config
+
+
+
+#ROOM TABLE
+      rooms = [(NULL, "parents",NULL,NULL),(NULL, "child",NULL,NULL), (NULL, "bathroomBig",NULL,NULL),(NULL, "bathroomSmall",NULL,NULL),(NULL, "homeoffice",NULL,NULL),(NULL, "entrance",NULL,NULL),(NULL, "livingroom",NULL,NULL)]
+      rooms.append([ (NULL, "kitchen",NULL,NULL), (NULL, "preBedroom",NULL,NULL) ])
+      #fill tables
+      curs.executemany("INSERT INTO rooms VALUES(NULL,?,?,)")
+      #update status from arduino name
+      curs.execute("UPDATE arduinos SET status=? WHERE id=?",status,ardID)
+      curs.execute("DELETE FROM arduinos WHERE id=?",status,ardID)
+      #ESP TABLE
+      esps=[(1,NULL,NULL,"192.168.1.11"),(2,NULL,NULL,"192.168.1.12"),(1,NULL,NULL,"192.168.1.13")]

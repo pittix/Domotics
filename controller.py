@@ -15,7 +15,7 @@ import paho.mqtt.client as mqtt
 import datetime.datetime as dt
 
 DB_FILE = "/home/pittix/hdd/uni2/Domotics/controller/database.sqlite" # database sqlite3 file
-
+IVLEN = 16 #number of hex digits for the initialization vector
 class MainController():
 
 
@@ -30,6 +30,7 @@ class DatabaseActions():
     #store values
     self.DATA_TEMP = 5
     self.DATA_STATUS = 6
+    self.DATA_UPDATE_ALL=7
 
 
     def database_connect(self):
@@ -44,21 +45,19 @@ class DatabaseActions():
             return curs
         else:
             #table creation -- TIP createIfNotExists
-            curs.execute("CREATE TABLE rooms(id integer primary key,name varchar unique, device integer, isEsp boolean )")
-            curs.execute("CREATE TABLE arduinos(id integer primary key,room integer foreign key rooms.id , status integer , espID integer)")
+
+            #rooms name, data must be inserted manually
+            curs.execute("CREATE TABLE rooms(id integer primary key,name varchar unique )")
+            #arduinos table. data can be initialized manually or derived from esp
+            curs.execute("CREATE TABLE arduinos(id integer primary key,SN varchar,room integer foreign key rooms.id , status integer , espID integer,curConfig integer,controlsZone integer unique)")
+            #esp list. data should be initialized at the beginning
             curs.execute("CREATE TABLE esp(id integer primary key, room integer foreign key rooms.id, name varchar unique, status integer , esp_ip varchar, esp_dataKey varchar,esp_ivKey varchar,esp_passphrase varchar, esp_staticIV varchar)")
-            curs.execute("CREATE TABLE recordedTemperature(id integer primary key,temperature float,station integer, isEsp boolean ,recordTime datetime)")
-            curs.execute("CREATE TABLE setTemperature(id integer primary key,temperature float,room integer, isEsp blob)")
-            #ROOM TABLE
-            rooms = [(NULL, "parents",NULL,NULL),(NULL, "child",NULL,NULL), (NULL, "bathroomBig",NULL,NULL),(NULL, "bathroomSmall",NULL,NULL),(NULL, "homeoffice",NULL,NULL),(NULL, "entrance",NULL,NULL),(NULL, "livingroom",NULL,NULL)]
-            rooms.append([ (NULL, "kitchen",NULL,NULL), (NULL, "preBedroom",NULL,NULL) ])
-            #fill tables
-            curs.executemany("INSERT INTO rooms VALUES(NULL,?,?,)")
-            #update status from arduino name
-            curs.execute("UPDATE arduinos SET status=? WHERE id=?",status,ardID)
-            curs.execute("DELETE FROM arduinos WHERE id=?",status,ardID)
-            #ESP TABLE
-            esps=[(1,NULL,NULL,"192.168.1.11"),(2,NULL,NULL,"192.168.1.12"),(1,NULL,NULL,"192.168.1.13")]
+            #stores the temperatures
+            curs.execute("CREATE TABLE recordedTemperature(id integer primary key,temperature float,station integer foreign key arduinos.id, isEsp boolean ,recordTime timestamp)")
+            #current configuration for each arduino and ESP
+            curs.execute("CREATE TABLE setConfig(id integer primary key,minTemp float,maxTemp float, room integer foreign key rooms.id, roomEnabled boolean,isEsp boolean)")
+            #program some temperatures
+            curs.execute("CREATE TABLE program(id integer primary key,minTemp float,maxTemp float, room integer foreign key rooms.id, startTime timestamp, endTime timestamp)")
             return curs
 
     def get_data_from_db(self,espN,reqType):
@@ -73,7 +72,7 @@ class DatabaseActions():
         """
         cursor = self.database_connect()
         if(reqType == self.DATA_CONFIG):
-            ret = cursor.execute("SELECT id FROM esp WHERE name is ? ",topic)
+            ret=cursor.execute("SELECT arduinos.SN,arduinos.curConfig FROM esp LEFT JOIN arduinos ON esp.id=arduinos.espID WHERE esp.name=?",espN)
         elif(reqType == self.DATA_CIPHER):
             #data request
             ret = cursor.execute("SELECT esp_dataKey,esp_ivKey,esp_passphrase,esp_staticIV FROM esp WHERE name is ? ",topic)
@@ -86,9 +85,10 @@ class DatabaseActions():
             ret = cursor.execute("SELECT roomID FROM arduinos WHERE espID IS ? ",espN)
         elif(reqType == self.DATA_ROOM_ALL):
             ret = cursor.execute("SELECT id,roomID FROM arduinos")
+        elif(reqType==self.DATA_UPDATE_ALL):
+            ret=cursor.execute("SELECT arduinos.SN,arduinos.curConfig FROM esp LEFT JOIN arduinos ON esp.id=arduinos.espID WHERE esp.name=?",espN)
         else:
             log.warning("In DatabaseActions.get_data_from_db no valid type was given, %s ",reqType)
-        cursor.execute("SELECT esp.id,arduinos.id FROM esp LEFT JOIN arduinos ON esp.id=arduinos.espID WHERE esp.name=?",espN)
         #disconnect from db
         cursor.disconnect()
         return ret
@@ -122,13 +122,11 @@ class ConnectionHandler(self):
 
         #on_message of the heating system. Messages from the ESP connected to the boiler. Special parsing
 
-    def sendTo(espName):
+    def sendTo(espName,data):
         """sends encrypted data to a specific esp. there's one byte for each connected arduino preceded by one byte identifying it """
         (dataK,IV_K,passphrase,staticIV)=db_conn.get_data_from_db(espName,DATA_CYPHER)
-
-        dataConf = db_conn.get_data_from_db(espName,DATA_CONFIG)
         #cypher data
-        iv =0 #need to generate an IV for the cypher
+        iv =binascii.b2a_hex(os.urandom(IV_LEN/2)) #need to generate an IV for the cypher
         #enc IV
         encIV = aes.new(IV_K,mode=aes.MODE_CBC,IV=staticIV) # create the cypher
         iv_enc = encIV.encrypt(iv)
@@ -138,10 +136,10 @@ class ConnectionHandler(self):
         #decr data
         encrData =aes.new(dataK,mode=aes.MODE_CBC,IV=iv) # create the cypher
         data_enc = encrData.encrypt(dataConf)
-        message=s.join([iv_enc,cliID_enc,data_enc])
+        message=iv_enc+","+cliID_enc+","+data_enc # concatenate data with comma as a separator
         hmac = HMAC.new(passphrase,message,SHA)
         computed_hash = hmac.hexdigest()
-        data=s.join([iv_enc,cliID_enc,data_enc,computed_hash])
+        data=message + ","+computed_hash
         #send data to the esp
         mqtt_broker.publish(espName,data)
 
@@ -149,6 +147,8 @@ class ConnectionHandler(self):
         """Receives data from one ESP and then decides what to do with it (if it's temperature info, stores it in the database for example)"""
         topic = message.topic
         payl = message.payload
+        if(topic[-2:]("SN")):
+            update_arduinos(topic,payl)
 
         (dataK,IV_K,passphrase,staticIV)=get_data_from_db(topic,DATA_CYPHER)
         #uncypher data, check Auth+Integrity
@@ -200,11 +200,37 @@ class ConnectionHandler(self):
 
 
     def update_key_ivs(self,espN):
-        """Periodically update the keys and the IVs of each ESP to avoid collisions"""
+        """Periodically update the keys and the  staticIVs of each ESP to avoid collisions"""
+        #TODO
         return
+    #maybe useless as I need to know where the arduino was placed
+    # def update_arduinos(self,topic,message):
+    #     """Add arduinos connected to an ESP, so that the arduino """
+    #     return
 class DecisionMaker(self):
-    def update_arduino_config(self):
+    self.db_conn() = DatabaseActions()
+    def update_arduino_config(self,espN):
         """From the new data in the database, update the arduino config and store it in the database"""
+        db_conn.connect()
+        arduinos_rooms = db_conn.get(DatabaseActions.DATA_UPDATE_ALL)
+        #last room temperatures - relay version
+        curs=db_conn.connect()
+        now= dt.now()
+        prev = now - dt.timedelta(minutes=5)# 5 minutes interval
+
+        temperatures = curs.execute("SELECT temperature,room.id,room.name FROM recordedTemperatures LEFT JOIN rooms ON recordedTemperatures.room=rooms.id WHERE recordedTemperatures.recordTime BETWEEN ? and ?",prev,now)
+        roomSettings = curs.execute("SELECT minTemp,maxTemp,room,roomEnabled,isEsp FROM setConfig")# returns all configurations for each room or zone
+
+    def send_boiler_setting(self,zone,HeatTemp,waterTemp):
+        pass
+
+    def send_arduino_config(self,espN):
+        """When an esp is waken and sended data, transmits the updated config to it for all the arduinos connected to it"""
+        dataConf = db_conn.get_data_from_db(espName,DATA_CONFIG)
+        message=""
+        for SN,conf in dataConf:
+            message=SN+":"+conf+"\n"
+        ConnectionHandler.sendTo(espN,message)
 
 def __main__():
     ConnectionHandler.mqtt_start()
