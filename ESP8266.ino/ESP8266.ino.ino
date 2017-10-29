@@ -48,6 +48,7 @@
 
 //arduino data variable
 uint8_t* ARD_ADDRESSES;
+uint8_t* ARD_SN;
 uint8_t ardN;
 
 //WiFi connection parameters
@@ -77,6 +78,7 @@ PROGMEM const char* statusPath = "/stat/";
 PROGMEM const char* tempPath = "/temp/";
 PROGMEM const char* upPath = "/up/toRasp.json";
 PROGMEM const char* tempExt = ".temp";
+PROGMEM const char* cfgExt = ".cfg";
 PROGMEM const char* statusExt = ".st";
 PROGMEM const char *dataPath = "/data/";
 
@@ -128,7 +130,8 @@ void loadVars() {
   //arduino addresses on I2C
   File addrF = SPIFFS.open(addrPath, "r");
   for (uint8_t i = 0; i < ARD_N; i++) {
-    ARD_ADDRESSES[i] = addrF.read();
+    ARD_ADDRESSES[i] = (uint8_t)addrF.readStringUntil(' ').toInt();
+    ARD_SN[i] = (uint8_t) addrF.readStringUntil('\n').toInt();
   }
   addrF.close();
 
@@ -243,17 +246,58 @@ void connectWifi() {
   mqttCli.setServer(mqttServer,mqttPort);
   mqttCli.setCallback(receive_mqtt_data);
   // subscribe to its topic
-  
+  mqttCli.subscribe(mqttSubs);
   
 }
 void receive_mqtt_data(char* topic, byte* payload, unsigned int length){
   if(topic == mqttTopic){
     char* payl ;
+    File ardConf;
     memcpy(payl,payload,sizeof(char)*length);
     char* decData = decryptRC(payl);
+    // String Parsing
+    char line[30];
+    uint8_t t=0;
+    uint8_t i=0;
+    while(decData[i+t] != '\0')
+    {
+      //copy each char until end of the line is reached
+      while(decData[i+t]!='\n'){
+        line[i]=decData[i+t];
+        i++;
+      }
+      t+=i;
+      store_mqtt_data(String(line));  
+      i=0;  
+    }
     
     
   }
+}
+/**
+ * From each line, extract the config of each arduino and store it
+ * @param line a sequence of char ending with '\n' in the form of [SN]:[byteConf]\n
+ * @return true if decoding was successful, false otherwise
+ */
+boolean store_mqtt_data(String line){
+ int len1 = line.indexOf(":");
+ uint8_t* tmpArd=(uint8_t*)line.substring(0,len1).toInt();
+ String filename;
+  for(uint8_t i =0; i<ARD_N;i++){
+    //find the I2C address of the arduino
+    if(*tmpArd == ARD_SN[i]){
+      filename=confPath + String(ARD_ADDRESSES[i],HEX) + cfgExt;
+      if(SPIFFS.exists(filename)){
+        SPIFFS.remove(filename);
+      }
+      File ardConf=SPIFFS.open(filename,"w");
+      uint8_t* confData = (uint8_t*) line.substring(len1+1).toInt();
+      ardConf.write(confData,sizeof(confData));
+      ardConf.close();
+      return true;
+    }
+  }
+  return false;
 }
 /**
  * Encrypt data with AES-CBC. 
@@ -262,7 +306,8 @@ void receive_mqtt_data(char* topic, byte* payload, unsigned int length){
  */
 char* encryptTX(char* data){
 
- 
+   //TODO when AES library is OK
+
   return data;
 }
 /**
@@ -271,6 +316,7 @@ char* encryptTX(char* data){
  * @return decData plain data
  */
 char* decryptRC(char* data){
+  //TODO when AES library is OK
   return data;
 }
 /**
@@ -285,7 +331,7 @@ void setSleep() {
 */
 void storeUpdate() {
 
-
+//TODO
 }
 /**
  * Find the arduinos by serial number and stores them in the address file
