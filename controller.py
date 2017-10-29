@@ -48,7 +48,7 @@ class DatabaseActions():
         conn = sqlite3.connect(DB_FILE)
         curs = conn.cursor()
         #rooms name, data must be inserted manually
-        curs.execute('''CREATE TABLE IF NOT EXISTS rooms(id integer primary key, name text unique, zone integer )''')
+        curs.execute('''CREATE TABLE IF NOT EXISTS rooms(id integer primary key, name text unique, zone integer,isEnabled boolean default True )''')
         #arduinos table. data can be initialized manually or derived from esp
         curs.execute('''CREATE TABLE  IF NOT EXISTS
             arduinos(id integer primary key,SN text,room integer , status integer,
@@ -230,8 +230,19 @@ class DecisionMaker():
         now= dt.now()
         prev = now - dt.timedelta(minutes=5)# 5 minutes interval
 
-        temperatures = curs.execute("SELECT temperature,room.id,room.name FROM recordedTemperatures LEFT JOIN rooms ON recordedTemperatures.room=rooms.id WHERE recordedTemperatures.recordTime BETWEEN ? and ?",prev,now)
+        # temperatures = curs.execute("SELECT temperature,room.id,room.name FROM recordedTemperatures LEFT JOIN rooms ON recordedTemperatures.room=rooms.id WHERE recordedTemperatures.recordTime BETWEEN ? and ?",prev,now)
         roomSettings = curs.execute("SELECT minTemp,maxTemp,room,roomEnabled,isEsp FROM setConfig")# returns all configurations for each room or zone
+        #returns a tuple with the arduino id, the room id, the [minimum, average, maximum] temperature of that room in the last 5 minutes
+        roomTemps=curs.execute('''SELECT a.id, a.room,
+        	min(t.temperature),	avg(t.temperature),	max(t.temperature)
+            FROM  rooms as r
+            LEFT JOIN arduinos as a on r.id = a.room
+            LEFT JOIN recordedTemperature as t  on a.id= t.arduinoID
+            LEFT JOIN program as p on r.id = p.room
+            where r.isEnabled=1
+            and t.recordTime BETWEEN ? and ?
+            and p.startTime< time('now')  and p.endTime> time('now')
+            group by  p.room''',prev,now)
 
 
     def send_boiler_setting(self,zone,HeatTemp,waterTemp):
