@@ -19,90 +19,80 @@
    - /conf/addresses.cfg                    the I2C addresses of each arduino, one per line
    - /wifi/wpa.txt                          the credentials of the wifi. SSID is first row, pwd is second. Formatted as string
    - /wifi/ip.bin                           the ip addr, gateway and netmask. bytes[0:3] are ip, [4:7] are gw and [7:10] are the netmask
+   - /conf/cypher.cfg                       the aes IV_key, data_key, the static IV  and the SHA passphrase
 
    Uses:
-    - https://github.com/bblanchon/ArduinoJson to parse JSON from and to the raspberry
     - Wire to communicate to the arduinos attached
     - ESP8266WiFi to communicate via WiFi
-    -
+    - mqtt library to communicate data to raspberry
+    - aes library to encrypt data
 
 
 */
 
-// I2C addresses of the arduinos connected. Not used as addresses are stored in spiffs
-//#define ARD_SMALL_BATH 0x10
-//#define ARD_BIG_BATH 0x11
-//#define ARD_PARENT 0x12
-//#define ARD_CHILD 0x13
-//#define ARD_OFFICE 0x14
-//#define ARD_LIVING 0x15
-//#define ARD_ENTRANCE 0x16
-//#define ARD_KITCHEN 0x17
 
 #define TRANSMISSION_OK 0
 //Arduinos data constants
 #define ARD_N 5 //number of arduinos connected to ESP
-#define ARD_DATA_LEN 6 //byte
+#define ARD_DATA_LEN uint8_t(6) //byte
 
 //sleep time (in micro seconds)
 #define SLEEP_TIME 300e6 // 5 minutes sleep. Duty cycle should be around 1%
 
-#include "ArduinoJson.h"
-//#define ARDUINOJSON_ENABLE_PROGMEM 1 //fix problem
 
 #include <Wire.h>
 #include<ESP8266WiFi.h>
 #include <FS.h> // write into the 3M SPIFFS
 #include <ArduinoOTA.h>
+#include <PubSubClient.h>
 
-//#include <avr/pgmspace.h> //
 //arduino data variable
-uint8_t ARD_ADDRESSES[ARD_N];// =  { ARD_SMALL_BATH, ARD_BIG_BATH, ARD_PARENT,
-//ARD_CHILD,      ARD_OFFICE};
-const char *dataPath = "/data/";
+uint8_t* ARD_ADDRESSES;
+uint8_t ardN;
+
 //WiFi connection parameters
 char* ssid;
 char* pwd;
-char* myJsonD; // the path where to retrieve the file
-char* myJsonU; // the path where to upload the file
+char* mqttTopic;
+char* mqttServer;
+int mqttPort;
+char* mqttSubs;
+
+
 uint8_t ip[4];// = {192,168,1,10};
 uint8_t gw[4];// = {192,168,1,1};
 uint8_t netmask[4];// = {255,255,255,0};
 
-WiFiClient client;
+WiFiClient espClient;
+PubSubClient mqttCli(espClient);
 //SPIFFS memory (3MB max) allocation files. strings are saved into flash, not in ram
 PROGMEM const char* fwPath = "/down/";
 PROGMEM const char* wifiPath = "/wifi/wpa.txt";
 PROGMEM const char* ipPath = "/wifi/ip.bin";
 PROGMEM const char* confPath = "/conf/";
-PROGMEM const char* jsonPath = "/conf/json.cfg";
+PROGMEM const char* mqttPath = "/conf/mqtt.cfg";
 PROGMEM const char* addrPath = "/conf/addresses.cfg";
+PROGMEM const char* cypherPath = "/conf/cypher.cfg";
 PROGMEM const char* statusPath = "/stat/";
 PROGMEM const char* tempPath = "/temp/";
 PROGMEM const char* upPath = "/up/toRasp.json";
-PROGMEM const char* tmpJSON = "/tmp.json";
 PROGMEM const char* tempExt = ".temp";
 PROGMEM const char* statusExt = ".st";
+PROGMEM const char *dataPath = "/data/";
 
-
-//ftp strings
-PROGMEM const char* FTP_RC = "RETR ";
-PROGMEM const char* FTP_TX = "STOR ";
-PROGMEM const char* FTP_QUIT = "QUIT";
 
 
 void setup() {
-  loadVars();
+  loadVars(); // needed as the esp is resettes after each sleep
   //saves data from the arduino
   for (uint8_t i = 1; i < ARD_N; i++) {
     //    ardData[i] = receiveArduinoData()  ;
     delay(100);// 100 ms between one request and the other
   }
   connectWifi();
-  encodeJSON();
-  requestControllerData();
+  sendControllerData();
   WiFi.mode(WIFI_OFF);
-  decodeJSON();
+//  decodeJSON();
   setSleep();
 
 }
@@ -138,104 +128,54 @@ void loadVars() {
   //arduino addresses on I2C
   File addrF = SPIFFS.open(addrPath, "r");
   for (uint8_t i = 0; i < ARD_N; i++) {
-    ARD_ADDRESSES[i] = addrF.readStringUntil(' ');
-    addrF.readStringUntil('\n');//ignore the 
+    ARD_ADDRESSES[i] = addrF.read();
   }
   addrF.close();
 
-  //JSON filename
-  File jsonF = SPIFFS.open(jsonPath, "r");
-  tmp = jsonF.readStringUntil('\n');
-  tmpL = tmp.length();
-  tmp.toCharArray(myJsonD, tmpL);
-
-  tmp = jsonF.readStringUntil('\n');
-  tmpL = tmp.length();
-  tmp.toCharArray(myJsonU, tmpL);
-  jsonF.close();
+  //MQTT filename
+  File mqttF = SPIFFS.open(mqttPath, "r");
+  //extract mqtt publish topic, broker ip and subscription topic
+  mqttTopic = (char*)mqttF.readStringUntil('\n').c_str();
+  mqttServer = (char*)mqttF.readStringUntil(' ').c_str();
+  mqttPort = (int)mqttF.readStringUntil('\n').c_str();
+  mqttSubs = (char*)mqttF.readStringUntil('\n').c_str();
+  mqttF.close();
 }
 
-void requestControllerData() {
+void sendControllerData() {
   if (WiFi.status() != WL_CONNECTED) {
     connectWifi(); // reconnect
   }
-
-  File json = SPIFFS.open(tmpJSON, "w");//temp file
-  client.connect(gw, 21); //raspberry is the gatewayù
-  //retrieve json file
-  client.print(FTP_RC);
-  client.println(myJsonD);
-  client.print(FTP_TX);
-  client.println(myJsonU);
-  //end connection
-  client.println(FTP_QUIT);
-  //  client.close();
-}
-/**
-   The JSON is structured as follows
-   - 1 value per each arduino containing the settings to send to each arduino
-   - 1 url per each arduino where to find the code to upload. if the url is empty, no update is available
-   - 1 url where to find the OTA for the ESP. If the url is empty, no value is given
-*/
-uint8_t decodeJSON() {
-  File json = SPIFFS.open(tmpJSON, "r");//temp file
-  String tmp = json.readString();
-  //    const uint16_t bufSize = tmp.length()*2; //double the buffer
-  StaticJsonBuffer<800> jsonBuffer;
-
-  JsonObject &data = jsonBuffer.parseObject(tmp);
-  if (!data.success())
-  {
-    // Parsing fail TODO
-
-  }
-  uint8_t ardSetup[data.size()];
-  /**
-     Update the configuration of each arduino
-  */
-  for (uint8_t i = 0; i < ARD_N; i++) {
-    ardSetup[i] = data[String(i) + "c"];
-    if (data[String(i) + "u"] != "") {
-
+  //read data from SPIFFS and start encoding it
+  uint8_t tmpAddr;
+  String filename;
+  File temperatureF;
+  File addrF=SPIFFS.open(addrPath,"r");//use the serial number to identify the arduino
+  String data;
+  
+  for(uint8_t i=0; i<ardN;i++){
+    
+    tmpAddr=(uint8_t)strtol(addrF.readStringUntil(' ').c_str(),NULL,HEX); //I2C address needed for filename
+    data =data + addrF.readStringUntil('\n') + ':'; // [serial number]:[temperatures]\n
+    filename=tempPath + String(tmpAddr,HEX) + tempExt;
+    temperatureF=SPIFFS.open(filename,"r");
+    data+=temperatureF.read();
+    for(uint8_t j=1;j<ARD_DATA_LEN;i++){
+      data= data + String(",") + String((uint8_t)temperatureF.read(),DEC);
     }
-
+    data +='\n';
+    temperatureF.close();//close current temperature file
   }
-  return 0;
+  addrF.close(); //close addresses file
+
+  
+  //encrypt data with aes
+  char* encData=encryptTX((char*)data.c_str());
+
+  //send data as a string of hex values. data is already encrypted
+  mqttCli.publish(mqttTopic, encData, true);
+
 }
-/**
-   encode the data to be raspberry-readable
-   return the string with the json data
-*/
-void encodeJSON() {
-  String out;
-  StaticJsonBuffer<800> jsonBuffer;
-  JsonObject* parser = &jsonBuffer.createObject();
-  JsonObject* ardParser;
-
-  File json;
-  for (uint8_t k = 0; k < ARD_N; k++) {
-    json = SPIFFS.open(tempPath + String(ARD_ADDRESSES[k], HEX) + tempExt, "r"); //temp file for arduino k
-    ardParser  = &jsonBuffer.createObject();
-    uint8_t s = json.size();//file size
-    for (uint8_t i = 1; i <= s; i++) {
-      ardParser->set(String(i), String(json.read(), DEC));
-    }
-    String tmp;
-    ardParser->printTo(tmp);
-    parser->set(String(k), tmp.c_str());
-    json.close();
-  }
-
-  parser->printTo(out); // creates the string with all the data
-  //stores the data
-  if (SPIFFS.exists(upPath)) {
-    SPIFFS.remove(upPath);
-  }
-  File jsonFile = SPIFFS.open(upPath, "w");
-  jsonFile.write((int8_t)*out.c_str());
-  jsonFile.close();
-}
-
 
 /**
    Send data to the arduino at address addr. Makes sure that the data was correctly received
@@ -289,7 +229,7 @@ uint8_t* receiveArduinoData(uint8_t addr) {
   return 0;
 }
 /**
-   connect to wifi and then return. Use a static IP address
+   connect to wifi, then connects to mqtt broker and then return. Use a static IP address
 */
 void connectWifi() {
   WiFi.mode(WIFI_OFF);
@@ -299,7 +239,39 @@ void connectWifi() {
   while (WiFi.status() != WL_CONNECTED) {
     delay(200); //wait before returning
   }
+  // connect to the server and set callback function
+  mqttCli.setServer(mqttServer,mqttPort);
+  mqttCli.setCallback(receive_mqtt_data);
+  // subscribe to its topic
+  
+  
+}
+void receive_mqtt_data(char* topic, byte* payload, unsigned int length){
+  if(topic == mqttTopic){
+    char* payl ;
+    memcpy(payl,payload,sizeof(char)*length);
+    char* decData = decryptRC(payl);
+    
+    
+  }
+}
+/**
+ * Encrypt data with AES-CBC. 
+ * @param data the data to be encrypted
+ * @return encData the AES encrypted data
+ */
+char* encryptTX(char* data){
 
+ 
+  return data;
+}
+/**
+ * Decrypt received data with AES-CBC. 
+ * @param data the data to be decrypted
+ * @return decData plain data
+ */
+char* decryptRC(char* data){
+  return data;
 }
 /**
    Put the ESP to sleep for a fixed amount of time and then wake up as just started
@@ -311,17 +283,16 @@ void setSleep() {
 /**
    download and store in memory the arduino firmware update file so that it will be flashed later
 */
-void storeArduinoUpdate(uint8_t addr) {
-  // SPIFFS.open(path + String(addr),w);
+void storeUpdate() {
 
 
 }
 /**
- * Scan the connected arduinos and stores the data into /conf/addresses.conf in the format
- * 0x<ADDR><space><Serial Number>
+ * Find the arduinos by serial number and stores them in the address file
+ * This allows the program to identify the arduino by its serial number
  */
 void connectedArduinos(){
-  byte error,devFound;
+  byte errCode,devFound;
   byte buf[4]; //serial number store
   unsigned long SN=0;
   String formatted;
@@ -349,16 +320,16 @@ void connectedArduinos(){
       SN+= (buf[2] << 8); 
       SN+= (buf[3] ); 
       if(devFound==0){
-        formatted = String(i,HEX)+String(SN) ;
+        formatted = String(i,HEX)+" "+String(SN,DEC) ;
       }
       else{
-        formatted += '\n'+String(i,HEX)+String(SN) ;
+        formatted += '\n'+String(i,HEX)+" "+String(SN,DEC) ;
       }
       devFound++;
     }
   }
   //write the data at the end, so that the number of writing is reduced
-  addr.write(formatted);
+  addr.write((uint8_t*)formatted.c_str(),formatted.length());
   addr.close();
   
 }
