@@ -34,48 +34,43 @@ class DatabaseActions():
     DATA_STATUS = 6
     DATA_UPDATE_ALL=7
 
+    def __init__(self,connect=False):
+        if connect is True:
+            database_connect()
+
+    def disconnect(self):
+        self.connect.commit()
+        self.connect.close()
 
     def database_connect(self):
         #apparently it creates automatically the db, so I create tables needed
-        print("entrato")
-        if(False):
-            print("dentro isfile")
-            try:
-                conn = sqlite3.connect(DB_FILE)
-                print(sqlite3.version)
-            except Error as e:
-                print(e)
-            curs = conn.cursor()
-            return curs
-        else:
-            print("dentro else")
-            #table creation -- TIP createIfNotExists
-            conn = sqlite3.connect(DB_FILE)
-            curs = conn.cursor()
-            #rooms name, data must be inserted manually
-            curs.execute("CREATE TABLE IF NOT EXISTS rooms(id integer primary key, name text unique )")
-            #arduinos table. data can be initialized manually or derived from esp
-            curs.execute('''CREATE TABLE  IF NOT EXISTS
-                arduinos(id integer primary key,SN text,room integer , status integer,
-                espID integer,curConfig integer,controlsZone integer, foreign key (room) REFERENCES rooms(id))''')
-            #esp list. data should be initialized at the beginning
-            curs.execute('''CREATE TABLE  IF NOT EXISTS esp(id integer primary key,
-                room integer, name text unique, status integer , esp_ip text,
-                esp_dataKey text,esp_ivKey text,esp_passphrase text, esp_staticIV text,
-                foreign key (room) REFERENCES rooms(id))''')
-            #stores the temperatures
-            curs.execute('''CREATE TABLE  IF NOT EXISTS recordedTemperature(id integer primary key,
-                    temperature float,arduinoID integer, isEsp boolean,
-                    recordTime timestamp, foreign key (arduinoID) REFERENCES arduinos(id) )''')
-            #current configuration for each arduino and ESP
-            curs.execute('''CREATE TABLE  IF NOT EXISTS setConfig(id integer primary key,
-                        minTemp float,maxTemp float, room integer, roomEnabled boolean,
-                        isEsp boolean,foreign key (room) REFERENCES rooms(id))''')
-            #program some temperatures
-            curs.execute('''CREATE TABLE  IF NOT EXISTS program(id integer primary key,minTemp float,maxTemp float,
-             room integer, startTime timestamp, endTime timestamp,foreign key (room) REFERENCES rooms(id))''')
-            conn.commit()
-            return curs
+        #table creation -- TIP createIfNotExists
+        conn = sqlite3.connect(DB_FILE)
+        curs = conn.cursor()
+        #rooms name, data must be inserted manually
+        curs.execute('''CREATE TABLE IF NOT EXISTS rooms(id integer primary key, name text unique, zone integer )''')
+        #arduinos table. data can be initialized manually or derived from esp
+        curs.execute('''CREATE TABLE  IF NOT EXISTS
+            arduinos(id integer primary key,SN text,room integer , status integer,
+            espID integer,curConfig integer,controlsZone integer, foreign key (room) REFERENCES rooms(id))''')
+        #esp list. data should be initialized at the beginning
+        curs.execute('''CREATE TABLE  IF NOT EXISTS esp(id integer primary key,
+            room integer, name text unique, status integer , esp_ip text,
+            esp_dataKey text,esp_ivKey text,esp_passphrase text, esp_staticIV text,
+            foreign key (room) REFERENCES rooms(id))''')
+        #stores the temperatures
+        curs.execute('''CREATE TABLE  IF NOT EXISTS recordedTemperature(id integer primary key,
+                temperature float,arduinoID integer, isEsp boolean,
+                recordTime timestamp, foreign key (arduinoID) REFERENCES arduinos(id) )''')
+        #current configuration for each arduino and ESP
+        curs.execute('''CREATE TABLE  IF NOT EXISTS setConfig(id integer primary key,
+                    minTemp float,maxTemp float, room integer, roomEnabled boolean,
+                    isEsp boolean,foreign key (room) REFERENCES rooms(id))''')
+        #program some temperatures
+        curs.execute('''CREATE TABLE  IF NOT EXISTS program(id integer primary key,minTemp float,maxTemp float,
+         room integer, startTime timestamp, endTime timestamp,foreign key (room) REFERENCES rooms(id))''')
+        conn.commit()
+        self.connection = conn
 
     def get_data_from_db(self,espN,reqType):
         """ return the data from the database regarding an ESP or ARDUINO, depending on the data type
@@ -87,7 +82,7 @@ class DatabaseActions():
             DATA_ROOM return the room id to which an arduino is connected
             DATA_ROOM_ALL returns a list of tuples with (arduinoID,roomID)
         """
-        cursor = self.database_connect()
+        cursor = self.connect.cursor()
         if(reqType == self.DATA_CONFIG):
             ret=cursor.execute("SELECT arduinos.SN,arduinos.curConfig FROM esp LEFT JOIN arduinos ON esp.id=arduinos.espID WHERE esp.name=?",espN)
         elif(reqType == self.DATA_CIPHER):
@@ -237,6 +232,7 @@ class DecisionMaker():
 
         temperatures = curs.execute("SELECT temperature,room.id,room.name FROM recordedTemperatures LEFT JOIN rooms ON recordedTemperatures.room=rooms.id WHERE recordedTemperatures.recordTime BETWEEN ? and ?",prev,now)
         roomSettings = curs.execute("SELECT minTemp,maxTemp,room,roomEnabled,isEsp FROM setConfig")# returns all configurations for each room or zone
+
 
     def send_boiler_setting(self,zone,HeatTemp,waterTemp):
         pass
