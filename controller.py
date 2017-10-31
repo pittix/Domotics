@@ -48,23 +48,23 @@ class DatabaseActions():
         conn = sqlite3.connect(DB_FILE)
         curs = conn.cursor()
         #rooms name, data must be inserted manually
-        curs.execute('''CREATE TABLE IF NOT EXISTS rooms(id integer primary key, name text unique, zone integer,isEnabled boolean default True )''')
+        curs.execute('''CREATE TABLE IF NOT EXISTS rooms(id integer primary key, name text unique, zone integer)''')
         #arduinos table. data can be initialized manually or derived from esp
         curs.execute('''CREATE TABLE  IF NOT EXISTS
-            arduinos(id integer primary key,SN text,room integer , status integer,
-            espID integer,curConfig integer,controlsZone integer, foreign key (room) REFERENCES rooms(id))''')
+            arduinos(id integer primary key,SN text,roomID integer , status integer,
+            espID integer,curConfig integer,controlsZone integer, foreign key (roomID) REFERENCES rooms(id))''')
         #esp list. data should be initialized at the beginning
         curs.execute('''CREATE TABLE  IF NOT EXISTS esp(id integer primary key,
-            room integer, name text unique, status integer , esp_ip text,
+            roomID integer, name text unique, status integer , esp_ip text,
             esp_dataKey text,esp_ivKey text,esp_passphrase text, esp_staticIV text,
-            foreign key (room) REFERENCES rooms(id))''')
+            foreign key (roomID) REFERENCES rooms(id))''')
         #stores the temperatures
         curs.execute('''CREATE TABLE  IF NOT EXISTS recordedTemperature(id integer primary key,
-                temperature float,arduinoID integer, isEsp boolean,
+                temperature float,arduinoID integer,
                 recordTime timestamp, foreign key (arduinoID) REFERENCES arduinos(id) )''')
         #current configuration for each arduino and ESP
         curs.execute('''CREATE TABLE  IF NOT EXISTS setConfig(id integer primary key,
-                    minTemp float,maxTemp float, room integer, roomEnabled boolean,
+                    minTemp float,maxTemp float, roomID integer, roomEnabled boolean default True ,
                     isEsp boolean,foreign key (room) REFERENCES rooms(id))''')
         #program some temperatures
         curs.execute('''CREATE TABLE  IF NOT EXISTS program(id integer primary key,minTemp float,maxTemp float,
@@ -230,20 +230,24 @@ class DecisionMaker():
         now= dt.now()
         prev = now - dt.timedelta(minutes=5)# 5 minutes interval
 
-        # temperatures = curs.execute("SELECT temperature,room.id,room.name FROM recordedTemperatures LEFT JOIN rooms ON recordedTemperatures.room=rooms.id WHERE recordedTemperatures.recordTime BETWEEN ? and ?",prev,now)
-        roomSettings = curs.execute("SELECT minTemp,maxTemp,room,roomEnabled,isEsp FROM setConfig")# returns all configurations for each room or zone
+        # extract all the programming running right now
+        program = curs.execute('''SELECT roomID,minTemp,maxTemp FROM setConfig
+            WHERE startTime < time('now') and endTime > time('now')''')# returns all configurations for each room or zone
         #returns a tuple with the arduino id, the room id, the [minimum, average, maximum] temperature of that room in the last 5 minutes
         roomTemps=curs.execute('''SELECT a.id, a.room,
-        	min(t.temperature),	avg(t.temperature),	max(t.temperature)
+        	min(t.temperature),	avg(t.temperature),	max(t.temperature),
+            sc.minTemp,sc.maxTemp,
             FROM  rooms as r
             LEFT JOIN arduinos as a on r.id = a.room
             LEFT JOIN recordedTemperature as t  on a.id= t.arduinoID
             LEFT JOIN program as p on r.id = p.room
-            where r.isEnabled=1
+            LEFT JOIN setConfig as sc on r.id = sc.room
+            where sc.roomEnabled=1
             and t.recordTime BETWEEN ? and ?
             and p.startTime< time('now')  and p.endTime> time('now')
             group by  p.room''',prev,now)
-
+        
+         x for pr in program if pr[0]
 
     def send_boiler_setting(self,zone,HeatTemp,waterTemp):
         pass

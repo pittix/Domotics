@@ -1,10 +1,10 @@
 /**
  * @author Andrea Pittaro
  * @date 2015/09/18
- * @comment This sketch, when ATtiny85 boots ask the RaspberryPi the temperature I set for my house bedroom and 
+ * @comment This sketch, when ATtiny85 boots ask the RaspberryPi the temperature I set for my house bedroom and
  * when asked by the RPI turns on or off. periodically it gives to rpi the temperature measured.
  */
- 
+
 #include <Wire.h> //transmission library
 #include <math.h> //needed for (int) = round(float/decimal var);
 #include <EEPROM.h> // store values into memory. I need 4 bytes, ATMega328p has 1024 bytes
@@ -12,9 +12,9 @@
 #include <avr/wdt.h> // watchdog
 
 #define WAIT 7 //cycles of 8 seconds
- 
+
 //pin relay
-#define relay 0 
+#define relay 0
 #define FORCE_MANUAL 1
 #define TEMPERATURE 2
 
@@ -38,14 +38,14 @@
 #define ADDR_STATUS 13 // address where the status is set (manual mode and cooling or heating is on)
 #define ADDR_BATT   14 //address where the battery voltage is stored
 volatile unsigned long counter = 0; //timer for sleeping
-const long InternalReferenceVoltage = 1062; // power voltage. Needed for temperature 
+const long InternalReferenceVoltage = 1062; // power voltage. Needed for temperature
 const uint8_t battTolerance = 20; // 0.1 V tolerance
 uint8_t chosenTemp = 190; // default temperature, in integer, one decimal
 float curTemp;
 
 //store info in only one var [inHome,manualMode,coolOn,heatOn,0,0,battery[2 bit] ] in 0 the one not used
 uint8_t status = 0b10000000; //default: in home and manual mode
-/*battery info are 
+/*battery info are
  * 00 for Extremely low (< 3V)
  * 01 for Low (3V<= batt < 3.3V)
  * 10 for Normal (3.3V <= batt < 4V)
@@ -53,13 +53,13 @@ uint8_t status = 0b10000000; //default: in home and manual mode
  */
 
 bool forceManual=false;
-uint8_t histTemp[5]; //last 5 temperatures, which corresponds to the last 5 minutes approximatly
+uint16_t histTemp[5]; //last 5 temperatures, which corresponds to the last 5 minutes approximatly
 //Initializes the ricetransmitter
 void setup() {
     analogReference (INTERNAL);//Internal AREF
     EEPROM.put(ADDR_ID, ARD_ID);
 
-    Wire.begin(ARD_ID); // the arduino is a slave. 
+    Wire.begin(ARD_ID); // the arduino is a slave.
     TWAR = (ARD_ID << 1) | 1;  // enable broadcasts to be received
     Wire.onReceive(receiveData);
     Wire.onRequest(sendData);
@@ -69,7 +69,7 @@ void setup() {
     pinMode(FORCE_MANUAL,INPUT);
     EEPROM.update(ADDR_BATT, (uint8_t)250);  //for first iteration
     //re-initialize value if arduino is resetted
-    
+
     chosenTemp = EEPROM.read(ADDR_TEMP);
     status = EEPROM.read(ADDR_STATUS);
 }
@@ -81,21 +81,21 @@ void loop() {
     //
     byte old_ADCSRA = ADCSRA;
     // disable ADC
-    ADCSRA = 0;  
-    set_sleep_mode(SLEEP_MODE_PWR_DOWN);  
+    ADCSRA = 0;
+    set_sleep_mode(SLEEP_MODE_PWR_DOWN);
     sleep_enable();
     sleep_cpu();
     sleep_disable();
-    ADCSRA = old_ADCSRA;      
+    ADCSRA = old_ADCSRA;
     counter=0;
     // release TWI bus / I2C
     TWCR = bit(TWEN) | bit(TWIE) | bit(TWEA) | bit(TWINT);
     // turn it back on again
-    Wire.begin(ARD_ID); 
+    Wire.begin(ARD_ID);
     TWAR = (ARD_ID << 1) | 1;  // enable broadcasts to be received
     getBattery(); //every minute check the battery status
    }
-  
+
   forceManual = (digitalRead(FORCE_MANUAL)==HIGH); //check if I set in failsafe mode
   //enable temperature sensor (gives current)
   uint8_t curTemp = getTemp();
@@ -113,31 +113,31 @@ void loop() {
   }
   histTemp[4] = histTemp[3];histTemp[3] = histTemp[2];histTemp[2] = histTemp[1];
   histTemp[0]=curTemp; //store this temperature
-    
+
   // sleep for about 56s, then measures the temperature level
   //sleep doesn't change the pin status (i.e. the relay stays HIGH or LOW while arduino is sleeping)
   for(uint8_t sleep= 0; sleep < 7; sleep++ ){
     //
     byte old_ADCSRA = ADCSRA;
     // disable ADC
-    ADCSRA = 0;  
-    set_sleep_mode(SLEEP_MODE_PWR_DOWN);  
+    ADCSRA = 0;
+    set_sleep_mode(SLEEP_MODE_PWR_DOWN);
     sleep_enable();
     sleep_cpu();
     sleep_disable();
-    ADCSRA = old_ADCSRA;      
-        
+    ADCSRA = old_ADCSRA;
+
     // release TWI bus / I2C
     TWCR = bit(TWEN) | bit(TWIE) | bit(TWEA) | bit(TWINT);
-    
+
     // turn it back on again
-    Wire.begin(ARD_ID); 
+    Wire.begin(ARD_ID);
     TWAR = (ARD_ID << 1) | 1;  // enable broadcasts to be received
 
    }
-   EEPROM.put(ADDR_TEMP, chosenTemp); // update EEPROM, if changed, with the new chosen temperature 
+   EEPROM.put(ADDR_TEMP, chosenTemp); // update EEPROM, if changed, with the new chosen temperature
    EEPROM.put(ADDR_STATUS, status);
-   
+
 }
 /*receive the data from the ESP8266 in the standard mode {inHome,manual,heatOn,coolOn,setTemp[4 bit]}
  * Temperature is given in the range [15;31]°C, which is sufficient to set the heat and cooling system
@@ -147,7 +147,7 @@ void receiveData(int numB){
   uint8_t temperature = data & TEMP_MASK; // extract temperature
   chosenTemp = temperature*10 + ZERO_TEMP; // transmit less data in coding the temperature
   status = data & !TEMP_MASK; //the other 4 bits are for the status
-   
+
 }
 //send data on ESP8266 requests. Stupid version, need optimization
 void sendData(){
@@ -180,10 +180,10 @@ uint8_t getTemp(){
  * So for example, 5V would be 50.
  * - Exploits temp results, saves results into "status" var and in EEPROM
  */
-void getBattery () 
+void getBattery ()
   {
   // REFS0 : Selects AVcc external reference
-  // MUX3 MUX2 MUX1 : Selects 1.1V (VBG)  
+  // MUX3 MUX2 MUX1 : Selects 1.1V (VBG)
    ADMUX = bit (REFS0) | bit (MUX3) | bit (MUX2) | bit (MUX1);
    ADCSRA |= bit( ADSC );  // start conversion
    while (ADCSRA & bit (ADSC))
@@ -207,5 +207,3 @@ void getBattery ()
       }
    }
   } // end of getBandgap
-
-
